@@ -5,7 +5,7 @@ from multiprocessing import Queue as MPQueue
 from fastapi import FastAPI
 
 # Imports aus deinem bestehenden TUI-Package
-from .loggers.server_logger import init_logger  # oder from . import init_logger, je nach __init__.py
+from .loggers.server_logger import init_logger
 from .ipc import get_queue_client
 from .middleware import TUIMiddleware
 
@@ -77,19 +77,27 @@ def setup_tui_logging(queue: MPQueue):
         logger.propagate = False
         logger.setLevel(logging.INFO)
 
-def configure_tui(app: FastAPI, log_queue: MPQueue = None) -> MPQueue:
+def create_tui_app(app: FastAPI) -> FastAPI:
     """
-    Konfiguriert Logging und Middleware für die TUI.
-    Gibt die Queue zurück (falls sie initialisiert wurde).
+    Instrumentiert eine FastAPI-Anwendung mit der TUI-Middleware und Logging.
+    Gibt die modifizierte App zurück, um Chaining zu ermöglichen.
+    
+    Usage:
+        app = FastAPI()
+        app = create_tui_app(app)
     """
-    if log_queue is None:
-        log_queue = get_queue_client()
+    # Queue holen (nur vorhanden, wenn via TUI Runner gestartet)
+    log_queue = get_queue_client()
     
     if log_queue:
-        # Logging Setup aufrufen
+        # 1. Logging Setup aufrufen (Stdout redirection etc.)
         setup_tui_logging(log_queue)
         
-        # Middleware hinzufügen
+        # 2. Middleware hinzufügen
         app.add_middleware(TUIMiddleware, queue=log_queue)
         
-    return log_queue
+    # 3. App zurückgeben
+    return app
+
+# Alias für Rückwärtskompatibilität
+configure_tui = create_tui_app

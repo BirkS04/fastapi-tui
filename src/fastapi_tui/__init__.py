@@ -45,6 +45,9 @@ from .config import TUIConfig, LogLevel, get_config, set_config
 # Setup - Main entry point
 from .setup import with_tui
 
+# Configure TUI
+from .configure_tui import configure_tui, create_tui_app
+
 # Core Models
 from .core import (
     EventType,
@@ -69,6 +72,8 @@ from .runner import TUIRunner, run_tui
 
 # Persistence
 from .persistence import TUIPersistence
+
+from .configure_tui import configure_tui
 
 # Widgets (for customization)
 from .widgets import (
@@ -103,6 +108,9 @@ __all__ = [
     "set_config",
     # Setup (main entry points)
     "with_tui",
+    # Configure TUI
+    "configure_tui",
+    "create_tui_app",
     # Core Models
     "EventType",
     "EndpointHit",
