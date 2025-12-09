@@ -4,30 +4,33 @@ import time
 import signal
 import atexit
 import threading
-from multiprocessing import Queue as MPQueue
 from typing import Optional, Callable, Any
 import subprocess
-from importlib import import_module # NEU: Für dynamischen Import
+from importlib import import_module
 from .ipc import start_manager_server
 from .config import get_config
 
 class TUIRunner:
     def __init__(
         self,
-        app: Optional[Any] = None,          # NEU: Direkte App-Instanz
+        app: Optional[Any] = None,
         app_factory: Optional[Callable] = None,
         app_module: str = "app.main:app_for_reload",
         port: int = 8000,
         host: str = "0.0.0.0"
     ):
-        self.app = app                      # NEU
+        self.app = app
         self.app_factory = app_factory
         self.app_module = app_module
         
+        # Config laden (wurde in setup.py bereits mit CLI-Args gemerged)
         self.config = get_config()
         
-        self.port = port if port != 8000 else self.config.port
-        self.host = host if host != "0.0.0.0" else self.config.host
+        # Wir nutzen die Werte aus der Config als "Single Source of Truth".
+        # Die Argumente port/host im __init__ dienen nur als Fallback,
+        # falls der Runner manuell (ohne with_tui) instanziiert wird.
+        self.port = self.config.port
+        self.host = self.config.host
         
         self.queue = None
         self.manager = None
@@ -38,16 +41,17 @@ class TUIRunner:
         """Start the TUI with FastAPI backend"""
         self._setup_cleanup()
         
-        reload = reload or self.config.reload
+        # Reload aus Config hat Vorrang (da CLI-Args dort schon drin sind)
+        should_reload = self.config.reload or reload
         
         # 1. STARTE IPC SERVER
         self.manager = start_manager_server()
         self.queue = self.manager.get_queue()
         
-        self._print_banner(reload)
+        self._print_banner(should_reload)
         
         # 2. Starte FastAPI
-        if reload:
+        if should_reload:
             self._start_api_with_reload()
         else:
             self._start_api_process()
@@ -70,8 +74,9 @@ class TUIRunner:
         finally:
             self._cleanup()
     
+    # ... (Rest der Methoden: _monitor_process_output, _setup_cleanup, etc. bleiben gleich) ...
+    
     def _monitor_process_output(self):
-        # ... (Code bleibt gleich wie vorher) ...
         if not self.api_process or not self.api_process.stdout:
             return
 
@@ -101,7 +106,6 @@ class TUIRunner:
         signal.signal(signal.SIGTERM, lambda s, f: self._cleanup())
     
     def _print_banner(self, reload: bool) -> None:
-        # ... (Code bleibt gleich wie vorher) ...
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("🚀 FastAPI TUI Monitor starting...")
         print(f"🔗 Server running on http://{self.host}:{self.port}")
@@ -115,14 +119,12 @@ class TUIRunner:
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
     def _get_subprocess_env(self) -> dict:
-        # ... (Code bleibt gleich wie vorher) ...
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["TUI_CONFIG_PAYLOAD"] = self.config.to_json_payload()
         return env
 
     def _start_api_process(self) -> None:
-        # ... (Code bleibt gleich wie vorher) ...
         env = self._get_subprocess_env()
         cmd = [
             sys.executable, "-m", "uvicorn",
@@ -136,7 +138,6 @@ class TUIRunner:
         )
     
     def _start_api_with_reload(self) -> None:
-        # ... (Code bleibt gleich wie vorher) ...
         env = self._get_subprocess_env()
         cmd = [
             sys.executable, "-m", "uvicorn",
@@ -154,38 +155,21 @@ class TUIRunner:
         )
     
     def _preload_endpoints(self) -> None:
-        """
-        Versucht die Routen zu laden. 
-        Priorität: 
-        1. Übergebene App-Instanz
-        2. App Factory
-        3. Dynamischer Import via app_module String
-        """
         target_app = None
-        
-        # Strategie 1: Direkte Instanz
         if self.app:
             target_app = self.app
-            
-        # Strategie 2: Factory
         elif self.app_factory:
             try:
                 target_app = self.app_factory()
-            except Exception as e:
-                print(f"[DEBUG] Factory failed: {e}")
-
-        # Strategie 3: Dynamischer Import (Fallback)
+            except Exception: pass
         elif self.app_module:
             try:
-                # z.B. "app.main:app" -> module="app.main", attr="app"
                 module_path, app_name = self.app_module.split(":")
                 mod = import_module(module_path)
                 target_app = getattr(mod, app_name)
-            except Exception as e:
-                print(f"[DEBUG] Dynamic import failed for {self.app_module}: {e}")
+            except Exception: pass
 
         if not target_app:
-            # print("[DEBUG] No app found for preload")
             return
 
         try:
@@ -196,16 +180,13 @@ class TUIRunner:
                         "path": route.path,
                         "methods": list(getattr(route, "methods", []))
                     })
-            
             self.queue.put({
                 "type": "startup_routes",
                 "data": routes
             })
-        except Exception as e:
-            print(f"[DEBUG] Error extracting routes: {e}")
+        except Exception: pass
     
     def _cleanup(self) -> None:
-        # ... (Code bleibt gleich wie vorher) ...
         self.stop_event.set()
         if self.api_process:
             self.api_process.terminate()
@@ -217,7 +198,7 @@ class TUIRunner:
             self.manager.shutdown()
 
 def run_tui(
-    app: Optional[Any] = None,          # NEU
+    app: Optional[Any] = None,
     app_factory: Optional[Callable] = None,
     app_module: str = "app.main:app_for_reload",
     reload: bool = False,
@@ -225,7 +206,7 @@ def run_tui(
     host: str = "0.0.0.0"
 ) -> None:
     runner = TUIRunner(
-        app=app,                        # NEU
+        app=app,
         app_factory=app_factory,
         app_module=app_module,
         port=port,

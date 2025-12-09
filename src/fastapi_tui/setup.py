@@ -9,7 +9,7 @@ def with_tui(
     app: Optional["FastAPI"] = None,
     config: Optional[TUIConfig] = None,
     app_factory: Optional[Callable] = None,
-    app_module: str = "app.main:app",  # Standard angepasst
+    app_module: str = "app.main:app",
     host: str = "127.0.0.1",
     port: int = 8000
 ) -> None:
@@ -18,8 +18,13 @@ def with_tui(
     """
     if config is None:
         config = TUIConfig.from_cli()
-        config.host = host
-        config.port = port
+        # Fallback auf Funktionsargumente, wenn nicht in CLI/Config
+        if config.host == "0.0.0.0": config.host = host
+        if config.port == 8000: config.port = port
+    else:
+        # WICHTIG: Auch wenn Config per Code übergeben wurde,
+        # CLI Argumente (--reload, --port) müssen gewinnen!
+        config.override_from_cli()
     
     set_config(config)
     
@@ -28,28 +33,27 @@ def with_tui(
         from .runner import run_tui
         
         run_tui(
-            app=app,                # NEU: App Instanz weitergeben
+            app=app,
             app_factory=app_factory,
             app_module=app_module,
+            # Wir nutzen jetzt strikt die Config als Source of Truth
             reload=config.reload,
             port=config.port,
             host=config.host
         )
         return
 
-    # --- FALL 2: Standard Uvicorn Modus (ohne TUI) ---
+    # --- FALL 2: Standard Uvicorn Modus ---
     import uvicorn
     
-    print(f"FastAPI läuft auf http://{host}:{port}")
+    print(f"FastAPI läuft auf http://{config.host}:{config.port}")
     print("Starte mit --tui für TUI Monitor")
     
-    # Wir nehmen die Instanz oder die Factory
     app_instance = app
     if app_instance is None and app_factory is not None:
         app_instance = app_factory()
     
     if app_instance is None:
-        # Fallback auf Import-String
-        uvicorn.run(app_module, host=host, port=port)
+        uvicorn.run(app_module, host=config.host, port=config.port)
     else:
-        uvicorn.run(app_instance, host=host, port=port)
+        uvicorn.run(app_instance, host=config.host, port=config.port)
