@@ -1,6 +1,7 @@
 import contextvars
 from typing import List, Any, Optional
 from queue import Queue
+from ..config import get_config # NEU
 
 # ContextVars for request-scoped data
 runtime_logs_ctx = contextvars.ContextVar("runtime_logs", default=[])
@@ -10,11 +11,19 @@ log_queue_ctx = contextvars.ContextVar("log_queue", default=None)
 def add_runtime_log(log: Any):
     """
     Adds a log entry to the current request's runtime logs.
-    The log can be any serializable object (str, dict, list, etc.).
-    Also sends the log immediately to the TUI if queue is available.
     """
+    config = get_config() # NEU
+    
+    # Wenn Runtime Logs deaktiviert sind, machen wir gar nichts
+    if not config.enable_runtime_logs:
+        return
+
     try:
         logs = runtime_logs_ctx.get()
+        
+        # NEU: Optional Daten maskieren (falls du das willst)
+        log = config.scrub_data(log) 
+        
         logs.append(log)
         
         # Send real-time update to TUI
@@ -27,17 +36,13 @@ def add_runtime_log(log: Any):
                 "data": {
                     "request_id": request_id,
                     "log": log,
-                    "all_logs": list(logs)  # Send all logs for consistency
+                    "all_logs": list(logs)
                 }
             })
     except LookupError:
-        # Fallback if context is not initialized (e.g. outside request)
         pass
 
 def get_runtime_logs() -> List[Any]:
-    """
-    Returns the list of runtime logs for the current request.
-    """
     try:
         return runtime_logs_ctx.get()
     except LookupError:

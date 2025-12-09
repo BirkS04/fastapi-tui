@@ -98,7 +98,7 @@ from .handlers import (
 # Loggers
 from .loggers.server_logger import init_logger, write_server_log
 from .loggers.runtime_logger import add_runtime_log, get_runtime_logs
-from .loggers.exception_logger import capture_exception, is_dev_mode, get_error_response_detail
+from .loggers.exception_logger import capture_exception, get_error_response_detail
 
 __all__ = [
     # Config

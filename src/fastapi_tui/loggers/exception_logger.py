@@ -1,6 +1,5 @@
 """
 Exception Logger - Captures exceptions with full context for TUI display.
-Supports dev/prod mode distinction.
 """
 
 import os
@@ -12,28 +11,17 @@ from pydantic import BaseModel, Field
 from queue import Queue
 
 from .runtime_logger import log_queue_ctx, request_id_ctx
-
-
-# Sensitive variable names to filter
-SENSITIVE_PATTERNS = ['password', 'token', 'secret', 'key', 'auth', 'credential', 'api_key']
-
-
-def is_dev_mode() -> bool:
-    """Check if running in development mode."""
-    env = os.getenv("ENV", "development").lower()
-    return env in ("development", "dev", "local")
+# NEU: Config importieren
+from ..config import get_config
 
 
 class StackFrame(BaseModel):
-    """Represents a single stack frame."""
     filename: str
     function: str
     lineno: int
     locals_preview: Dict[str, str] = Field(default_factory=dict)
 
-
 class ExceptionInfo(BaseModel):
-    """Complete exception information for display."""
     id: str = Field(default_factory=lambda: str(__import__('uuid').uuid4()))
     exception_type: str
     message: str
@@ -49,15 +37,7 @@ class ExceptionInfo(BaseModel):
             datetime: lambda v: v.isoformat()
         }
 
-
-def _is_sensitive(name: str) -> bool:
-    """Check if a variable name contains sensitive patterns."""
-    name_lower = name.lower()
-    return any(pattern in name_lower for pattern in SENSITIVE_PATTERNS)
-
-
 def _safe_repr(value: Any, max_length: int = 100) -> str:
-    """Safely get a string representation of a value."""
     try:
         r = repr(value)
         if len(r) > max_length:
@@ -66,9 +46,9 @@ def _safe_repr(value: Any, max_length: int = 100) -> str:
     except Exception:
         return f"<{type(value).__name__}: repr failed>"
 
-
 def _extract_locals(frame_locals: Dict[str, Any], max_vars: int = 10) -> Dict[str, str]:
     """Extract and sanitize local variables from a frame."""
+    config = get_config() # NEU: Config holen
     result = {}
     count = 0
     
@@ -76,12 +56,12 @@ def _extract_locals(frame_locals: Dict[str, Any], max_vars: int = 10) -> Dict[st
         if count >= max_vars:
             break
         
-        # Skip private/dunder variables
         if name.startswith('_'):
             continue
         
-        # Mask sensitive values
-        if _is_sensitive(name):
+        # NEU: Maskierung via Config prüfen
+        # Wir nutzen hier mask_body_fields als Liste für sensible Variablennamen
+        if name.lower() in config.mask_body_fields:
             result[name] = "***MASKED***"
         else:
             result[name] = _safe_repr(value)
@@ -89,7 +69,6 @@ def _extract_locals(frame_locals: Dict[str, Any], max_vars: int = 10) -> Dict[st
         count += 1
     
     return result
-
 
 def capture_exception(
     exc: Exception,
@@ -99,22 +78,17 @@ def capture_exception(
 ) -> ExceptionInfo:
     """
     Captures an exception with full context.
-    Sends to TUI queue if in dev mode.
-    
-    Returns ExceptionInfo for further processing.
     """
+    config = get_config() # NEU
     exc_type, exc_value, exc_traceback = sys.exc_info()
     
-    # Build frames list (only in dev mode for performance/security)
+    # NEU: Frames nur sammeln, wenn Exceptions aktiviert sind
     frames = []
-    if is_dev_mode() and exc_traceback:
+    if config.enable_exceptions and exc_traceback:
         tb = exc_traceback
         while tb is not None:
             frame = tb.tb_frame
-            
-            # Extract locals (with filtering)
             locals_preview = _extract_locals(dict(frame.f_locals))
-            
             frames.append(StackFrame(
                 filename=frame.f_code.co_filename,
                 function=frame.f_code.co_name,
@@ -123,13 +97,11 @@ def capture_exception(
             ))
             tb = tb.tb_next
     
-    # Get request_id from context if available
     try:
         request_id = request_id_ctx.get()
     except LookupError:
         request_id = None
     
-    # Create exception info
     exc_info = ExceptionInfo(
         exception_type=exc_type.__name__ if exc_type else type(exc).__name__,
         message=str(exc),
@@ -140,8 +112,8 @@ def capture_exception(
         method=method
     )
     
-    # Send to TUI queue if available (dev mode)
-    if is_dev_mode():
+    # NEU: Senden nur wenn aktiviert
+    if config.enable_exceptions:
         try:
             queue = log_queue
             if queue is None:
@@ -155,19 +127,15 @@ def capture_exception(
                     "type": "exception",
                     "data": exc_info.model_dump()
                 })
-            else:
-                print("[TUI] No queue available for exception logging (ctx or arg)")
-        except Exception as e:
-            print(f"[TUI] Error sending exception log: {e}")
+        except Exception:
             pass
-    else:
-        print("[TUI] Not in dev mode, skipping exception logging")
     
     return exc_info
 
-
 def get_error_response_detail(exc: Exception) -> str:
     """Returns appropriate error detail based on mode."""
-    if is_dev_mode():
+    config = get_config()
+    # Wenn Exceptions aktiviert sind (Dev Mode), zeigen wir Details
+    if config.enable_exceptions:
         return str(exc)
     return "An internal error occurred. Please try again later."

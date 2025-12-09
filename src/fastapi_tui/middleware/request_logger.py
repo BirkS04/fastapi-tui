@@ -1,8 +1,5 @@
 """
 TUI Middleware - Request Logger
-
-FastAPI middleware that captures all requests/responses and sends them to the TUI.
-This extracts the 180+ lines of middleware logic from main.py into a reusable component.
 """
 
 import json
@@ -17,48 +14,46 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Match
 
-
-
-
+# NEU: Config importieren
+from ..config import get_config
 
 class TUIMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware that logs all HTTP requests to the TUI event queue.
-    
-    Usage:
-        from fastapi_tui.middleware import TUIMiddleware
-        
-        app.add_middleware(TUIMiddleware, queue=my_queue)
-    """
-    
     def __init__(self, app, queue: MPQueue):
         super().__init__(app)
         self.queue = queue
+        # NEU: Config laden
+        self.config = get_config()
     
     async def dispatch(self, request: Request, call_next):
+        # NEU: Prüfen ob Request geloggt werden soll
+        if not self.config.should_log_request(request.url.path, request.method):
+            return await call_next(request)
+
         request_id = str(uuid.uuid4())
         start_time = datetime.now()
         
-        # Initialize runtime logs context
         from ..loggers.runtime_logger import runtime_logs_ctx, request_id_ctx, log_queue_ctx, get_runtime_logs
         
         logs_token = runtime_logs_ctx.set([])
         request_id_token = request_id_ctx.set(request_id)
         queue_token = log_queue_ctx.set(self.queue)
         
-        # Store in request.state for global exception handler
         request.state.tui_request_id = request_id
         request.state.tui_start_time = start_time
         request.state.tui_log_queue = self.queue
         
         try:
-            # Capture request data
             query_params = dict(request.query_params) if request.query_params else None
-            request_body = await self._capture_request_body(request)
-            request_headers = self._capture_headers(request)
+            
+            # NEU: Body maskieren
+            raw_body = await self._capture_request_body(request)
+            request_body = self.config.scrub_data(raw_body) if raw_body else None
+            
+            # NEU: Headers maskieren
+            request_headers = self.config.scrub_headers(self._capture_headers(request))
+            
             endpoint_path = self._get_endpoint_path(request)
             
-            # Send PENDING request
             self._send_pending_event(
                 request_id=request_id,
                 endpoint=endpoint_path,
@@ -70,19 +65,10 @@ class TUIMiddleware(BaseHTTPMiddleware):
                 request_headers=request_headers
             )
             
-            # Process request
             try:
-                # Wir versuchen, die App (und alle inneren Handler) aufzurufen
                 response = await call_next(request)
-                
             except Exception as exc:
-                # Dieser Block fängt NUR Fehler ab, die durch alle anderen Netze gefallen sind
-                # oder den Starlette-TaskGroup-Fehler verursachen.
-                
-                # Importiere deine Helper-Funktion (Pfad anpassen, falls nötig!)
-                # Ich nehme an, die liegt in fastapi_tui.handlers oder ähnlich
                 from fastapi_tui.exception_handler_utils import handle_exception_with_tui 
-                
                 response = handle_exception_with_tui(
                     request, 
                     exc,
@@ -91,13 +77,16 @@ class TUIMiddleware(BaseHTTPMiddleware):
                     log_to_runtime=True
                 )
 
-
             duration = (datetime.now() - start_time).total_seconds() * 1000
             
-            # Capture response body
-            response_body, response = await self._capture_response_body(response)
+            # NEU: Response Body maskieren (falls aktiviert)
+            response_body = None
+            if self.config.enable_response_body:
+                raw_res_body, response = await self._capture_response_body(response)
+                response_body = self.config.scrub_data(raw_res_body) if raw_res_body else None
+            else:
+                response_body = "<disabled>"
             
-            # Send COMPLETED event
             self._send_completed_event(
                 request_id=request_id,
                 endpoint=request.url.path,
@@ -116,11 +105,9 @@ class TUIMiddleware(BaseHTTPMiddleware):
             return response
             
         finally:
-            # WICHTIG: Logs VORHER speichern, bevor Context resettet wird
             current_logs = get_runtime_logs()
             request.state.tui_runtime_logs = current_logs
             
-            # Dann erst Context resetten
             runtime_logs_ctx.reset(logs_token)
             request_id_ctx.reset(request_id_token)
             log_queue_ctx.reset(queue_token)
@@ -203,13 +190,8 @@ class TUIMiddleware(BaseHTTPMiddleware):
             return {"_note": "multipart/form-data (parse error)", "size": len(body_bytes)}
     
     def _capture_headers(self, request: Request) -> Dict[str, str]:
-        """Capture selected request headers"""
-        headers = {
-            "content-type": request.headers.get("content-type"),
-            "user-agent": request.headers.get("user-agent"),
-            "authorization": "***" if request.headers.get("authorization") else None
-        }
-        return {k: v for k, v in headers.items() if v}
+        """Capture all headers (scrubbing happens later via config)"""
+        return dict(request.headers)
     
     def _get_endpoint_path(self, request: Request) -> str:
         """Get the endpoint path, trying to match route templates"""

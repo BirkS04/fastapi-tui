@@ -2,7 +2,7 @@ import os
 import sys
 import json
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Dict, Any
 from enum import Enum
 
 class LogLevel(str, Enum):
@@ -14,53 +14,122 @@ class LogLevel(str, Enum):
 
 @dataclass
 class TUIConfig:
-    # ... (Deine Felder bleiben gleich) ...
+    """
+    Configuration for the TUI system.
+    """
+    
+    # Server settings
     host: str = "0.0.0.0"
     port: int = 8000
+    
+    # Hot-reload settings
     reload: bool = False
     reload_dirs: List[str] = field(default_factory=lambda: ["app"])
     
+    # Feature toggles
+    # DEFAULT: Alles an, außer man schaltet es explizit aus
     enable_exceptions: bool = True
-    enable_request_logging: bool = True
+    enable_request_logging: bool = True 
     enable_response_body: bool = True
     enable_runtime_logs: bool = True
     enable_stats: bool = True
     enable_persistence: bool = True
     
+    # Logging settings
     log_level: LogLevel = LogLevel.INFO
     log_to_file: bool = False
     log_file_path: str = "tui.log"
     
+    # UI settings  
     show_sidebar: bool = True
     show_stats_panel: bool = True
     max_hits_display: int = 100
     max_log_lines: int = 1000
     
+    # Request filtering
+    # Standardmäßig filtern wir nur technische Health-Checks.
+    # Alles andere wird geloggt.
     exclude_paths: Set[str] = field(default_factory=lambda: {
-        
+        "/health",
+        "/healthz", 
+        "/ready",
+        "/metrics",
+        "/favicon.ico"
     })
     exclude_methods: Set[str] = field(default_factory=set)
     
+    # Sensitive data masking
     mask_headers: Set[str] = field(default_factory=lambda: {
-        "authorization", "x-api-key", "cookie", "set-cookie"
+        "authorization",
+        "x-api-key",
+        "cookie",
+        "set-cookie"
     })
     mask_body_fields: Set[str] = field(default_factory=lambda: {
-        "password", "secret", "token", "api_key", "apikey", "access_token", "refresh_token"
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token"
     })
     
+    # Persistence settings
     db_path: str = "tui_events.db"
+
+    # --- LOGIC METHODS (Das hat gefehlt!) ---
+
+    def should_log_request(self, path: str, method: str) -> bool:
+        """
+        Entscheidet, ob ein Request geloggt werden soll.
+        Standardmäßig JA, außer er ist explizit ausgeschlossen.
+        """
+        # 1. Globaler Schalter
+        if not self.enable_request_logging:
+            return False
+            
+        # 2. Pfad-Ausschluss (exakter Match)
+        if path in self.exclude_paths:
+            return False
+            
+        # 3. Methoden-Ausschluss
+        if method.upper() in self.exclude_methods:
+            return False
+            
+        return True
+
+    def scrub_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
+        """Maskiert Header basierend auf der Config."""
+        scrubbed = {}
+        for key, value in headers.items():
+            if key.lower() in self.mask_headers:
+                scrubbed[key] = "***"
+            else:
+                scrubbed[key] = value
+        return scrubbed
+
+    def scrub_data(self, data: Any) -> Any:
+        """
+        Rekursive Funktion zum Maskieren von sensiblen Feldern in JSON-Daten.
+        """
+        if isinstance(data, dict):
+            return {
+                k: "***" if k.lower() in self.mask_body_fields else self.scrub_data(v)
+                for k, v in data.items()
+            }
+        elif isinstance(data, list):
+            return [self.scrub_data(item) for item in data]
+        else:
+            return data
     
+    # --- SERIALIZATION METHODS ---
+
     def override_from_cli(self) -> None:
-        """
-        Überschreibt Config-Werte mit CLI-Argumenten.
-        CLI hat immer Vorrang vor Code-Config!
-        """
-        # 1. Reload Flag
+        """CLI Argumente haben Vorrang."""
         if "--reload" in sys.argv:
             self.reload = True
             
-        # 2. Port Parsing (--port=8000 oder --port 8000)
-        # Wir machen hier ein einfaches Parsing, um argparse Konflikte zu vermeiden
         for i, arg in enumerate(sys.argv):
             if arg.startswith("--port="):
                 try:
@@ -70,8 +139,7 @@ class TUIConfig:
                 try:
                     self.port = int(sys.argv[i+1])
                 except ValueError: pass
-                
-            # 3. Host Parsing
+            
             if arg.startswith("--host="):
                 self.host = arg.split("=")[1]
             elif arg == "--host" and i + 1 < len(sys.argv):
@@ -79,6 +147,7 @@ class TUIConfig:
 
     def to_json_payload(self) -> str:
         data = asdict(self)
+        # Sets zu Listen konvertieren für JSON
         data["exclude_paths"] = list(self.exclude_paths)
         data["exclude_methods"] = list(self.exclude_methods)
         data["mask_headers"] = list(self.mask_headers)
@@ -89,6 +158,7 @@ class TUIConfig:
     @classmethod
     def from_json_payload(cls, payload: str) -> "TUIConfig":
         data = json.loads(payload)
+        # Listen zurück zu Sets
         if "exclude_paths" in data: data["exclude_paths"] = set(data["exclude_paths"])
         if "exclude_methods" in data: data["exclude_methods"] = set(data["exclude_methods"])
         if "mask_headers" in data: data["mask_headers"] = set(data["mask_headers"])
@@ -112,10 +182,11 @@ class TUIConfig:
     @classmethod
     def from_cli(cls) -> "TUIConfig":
         config = cls.from_env()
-        config.override_from_cli() # Hier auch direkt anwenden
+        config.override_from_cli()
         return config
 
-# ... (Rest der Datei: get_config, set_config bleiben gleich) ...
+
+# Global config instance
 _config: Optional[TUIConfig] = None
 
 def get_config() -> TUIConfig:
