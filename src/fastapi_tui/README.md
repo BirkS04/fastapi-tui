@@ -6,7 +6,7 @@ Ein leistungsfähiges Terminal User Interface (TUI) für FastAPI-Anwendungen.
 
 ```python
 from fastapi import FastAPI
-from app.utils.tui import with_tui
+from fastapi_tui import with_tui
 
 app = FastAPI()
 
@@ -36,7 +36,7 @@ python -m app.main --tui --dev    # Mit Hot-Reload
 ## Configuration
 
 ```python
-from app.utils.tui import TUIConfig, with_tui, LogLevel
+from fastapi_tui import TUIConfig, with_tui, LogLevel
 
 config = TUIConfig(
     # Server
@@ -119,7 +119,7 @@ run_with_tui(create_app, "app.main:app_for_reload")
 ### Runtime Logging
 
 ```python
-from app.utils.tui import add_runtime_log
+from fastapi_tui import add_runtime_log
 
 @app.post("/example")
 async def example():
@@ -132,7 +132,7 @@ async def example():
 ### Exception Tracking
 
 ```python
-from app.utils.tui import capture_exception
+from fastapi_tui import capture_exception
 
 try:
     dangerous_operation()
@@ -196,7 +196,7 @@ app/utils/tui/
 ### Minimal Setup
 ```python
 from fastapi import FastAPI
-from app.utils.tui import with_tui
+from fastapi_tui import with_tui
 
 app = FastAPI()
 
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
 ### Mit Logging
 ```python
-from app.utils.tui import add_runtime_log
+from fastapi_tui import add_runtime_log
 
 @app.post("/process")
 async def process(data: dict):

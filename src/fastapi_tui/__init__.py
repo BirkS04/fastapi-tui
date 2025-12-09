@@ -9,7 +9,7 @@ The simplest way to add TUI monitoring:
 
 ```python
 from fastapi import FastAPI
-from app.utils.tui import with_tui
+from fastapi_tui import with_tui
 
 app = FastAPI()
 # ... configure your app ...
@@ -27,7 +27,7 @@ python -m app.main --tui --dev    # With hot-reload
 ## Configuration
 
 ```python
-from app.utils.tui import TUIConfig, with_tui
+from fastapi_tui import TUIConfig, with_tui
 
 config = TUIConfig(
     port=8080,

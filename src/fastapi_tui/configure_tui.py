@@ -5,9 +5,9 @@ from multiprocessing import Queue as MPQueue
 from fastapi import FastAPI
 
 # Imports aus deinem bestehenden TUI-Package
-from app.utils.tui import init_logger
-from app.utils.tui.ipc import get_queue_client
-from app.utils.tui.middleware import TUIMiddleware
+from .loggers.server_logger import init_logger  # oder from . import init_logger, je nach __init__.py
+from .ipc import get_queue_client
+from .middleware import TUIMiddleware
 
 def setup_tui_logging(queue: MPQueue):
     """

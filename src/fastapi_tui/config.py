@@ -26,7 +26,7 @@ class TUIConfig:
     Configuration for the TUI system.
     
     Usage:
-        from app.utils.tui import TUIConfig, with_tui
+        from fastapi_tui import TUIConfig, with_tui
         
         config = TUIConfig(
             port=8080,

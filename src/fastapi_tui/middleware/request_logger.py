@@ -26,7 +26,7 @@ class TUIMiddleware(BaseHTTPMiddleware):
     Middleware that logs all HTTP requests to the TUI event queue.
     
     Usage:
-        from app.utils.tui.middleware import TUIMiddleware
+        from fastapi_tui.middleware import TUIMiddleware
         
         app.add_middleware(TUIMiddleware, queue=my_queue)
     """
@@ -80,8 +80,8 @@ class TUIMiddleware(BaseHTTPMiddleware):
                 # oder den Starlette-TaskGroup-Fehler verursachen.
                 
                 # Importiere deine Helper-Funktion (Pfad anpassen, falls nötig!)
-                # Ich nehme an, die liegt in app.utils.tui.handlers oder ähnlich
-                from app.utils.tui.exception_handler_utils import handle_exception_with_tui 
+                # Ich nehme an, die liegt in fastapi_tui.handlers oder ähnlich
+                from fastapi_tui.exception_handler_utils import handle_exception_with_tui 
                 
                 response = handle_exception_with_tui(
                     request, 
