@@ -1,8 +1,3 @@
-"""
-TUI Runner
-Handles TUI startup with optional hot-reload support.
-"""
-
 import os
 import sys
 import time
@@ -13,6 +8,7 @@ from multiprocessing import Queue as MPQueue
 from typing import Optional, Callable
 import subprocess
 from .ipc import start_manager_server
+from .config import get_config
 
 class TUIRunner:
     def __init__(
@@ -24,8 +20,13 @@ class TUIRunner:
     ):
         self.app_factory = app_factory
         self.app_module = app_module
-        self.port = port
-        self.host = host
+        
+        # Lädt die Config (die du in main.py via set_config gesetzt hast)
+        self.config = get_config()
+        
+        self.port = port if port != 8000 else self.config.port
+        self.host = host if host != "0.0.0.0" else self.config.host
+        
         self.queue = None
         self.manager = None
         self.api_process = None
@@ -34,6 +35,8 @@ class TUIRunner:
     def run(self, reload: bool = False) -> None:
         """Start the TUI with FastAPI backend"""
         self._setup_cleanup()
+        
+        reload = reload or self.config.reload
         
         # 1. STARTE IPC SERVER
         self.manager = start_manager_server()
@@ -47,14 +50,12 @@ class TUIRunner:
         else:
             self._start_api_process()
         
-        # Starte den Stream-Reader Thread
-        # Dieser fängt alles ab, was main.py nicht via IPC sendet (z.B. C-Level Errors)
-        self.log_thread = threading.Thread(target=self._monitor_process_output, daemon=True)
-        self.log_thread.start()
+        if self.config.enable_runtime_logs:
+            self.log_thread = threading.Thread(target=self._monitor_process_output, daemon=True)
+            self.log_thread.start()
 
         time.sleep(0.5)
         
-        # Pre-load endpoints
         self._preload_endpoints()
         
         # 3. Starte TUI
@@ -74,7 +75,6 @@ class TUIRunner:
 
         while not self.stop_event.is_set() and self.api_process.poll() is None:
             try:
-                # Wir lesen Zeile für Zeile vom Subprozess
                 line = self.api_process.stdout.readline()
                 if not line:
                     break
@@ -83,18 +83,10 @@ class TUIRunner:
                 if not decoded_line:
                     continue
 
-                # Filter: Wir wollen keine Logs doppelt.
-                # Wenn main.py via IPC sendet, kommt es dort an.
-                # Wenn uvicorn aber direkt printet (z.B. beim Start), fangen wir es hier.
-                # Wir markieren diese Logs als "RAW", damit man sie unterscheiden kann.
-                
-                # Einfacher Filter: Wenn es wie ein JSON-Log aussieht oder vom IPC kommt, ignorieren.
-                # Da wir hier stdout/stderr pipen, sehen wir nur das, was wirklich auf die Konsole geschrieben wird.
-                
                 self.queue.put({
                     "type": "log",
                     "data": {
-                        "level": "INFO", # Default Level für Raw Output
+                        "level": self.config.log_level.value.upper(),
                         "message": decoded_line,
                         "type": "RAW"
                     }
@@ -109,16 +101,32 @@ class TUIRunner:
     def _print_banner(self, reload: bool) -> None:
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("🚀 FastAPI TUI Monitor starting...")
-        print(f"🔗 Server running on http://localhost:{self.port}")
+        print(f"🔗 Server running on http://{self.host}:{self.port}")
         print(f"🔌 IPC Server active")
         if reload:
             print("🔄 Hot-reload enabled")
+        if self.config.enable_persistence:
+            print(f"💾 Persistence enabled ({self.config.db_path})")
+        else: 
+            print("💾 Persistence disabled")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     
-    def _start_api_process(self) -> None:
-        """Start FastAPI in a subprocess without reload"""
+    def _get_subprocess_env(self) -> dict:
+        """
+        Erstellt die Environment-Variablen für den Subprozess.
+        Hier wird die gesamte Config als JSON-Payload injiziert.
+        """
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        
+        # ELEGANT: Wir übergeben das komplette Config-Objekt als JSON
+        env["TUI_CONFIG_PAYLOAD"] = self.config.to_json_payload()
+        
+        return env
+
+    def _start_api_process(self) -> None:
+        """Start FastAPI in a subprocess without reload"""
+        env = self._get_subprocess_env()
         
         cmd = [
             sys.executable, "-m", "uvicorn",
@@ -127,19 +135,17 @@ class TUIRunner:
             "--port", str(self.port),
         ]
         
-        # WICHTIG: PIPE nutzen, damit nichts auf den Screen leakt!
         self.api_process = subprocess.Popen(
             cmd, 
             env=env, 
             cwd=os.getcwd(),
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT # Stderr auch nach Stdout leiten
+            stderr=subprocess.STDOUT
         )
     
     def _start_api_with_reload(self) -> None:
         """Start FastAPI with uvicorn --reload"""
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
+        env = self._get_subprocess_env()
         
         cmd = [
             sys.executable, "-m", "uvicorn",
@@ -147,10 +153,11 @@ class TUIRunner:
             "--host", self.host,
             "--port", str(self.port),
             "--reload",
-            "--reload-dir", "app"
         ]
         
-        # WICHTIG: PIPE nutzen, damit nichts auf den Screen leakt!
+        for reload_dir in self.config.reload_dirs:
+            cmd.extend(["--reload-dir", reload_dir])
+        
         self.api_process = subprocess.Popen(
             cmd,
             env=env,
@@ -163,7 +170,7 @@ class TUIRunner:
         if not self.app_factory:
             return
         try:
-            temp_app = self.app_factory(log_queue=None) 
+            temp_app = self.app_factory() 
             routes = []
             for route in temp_app.routes:
                 if hasattr(route, "path"):
@@ -176,15 +183,14 @@ class TUIRunner:
                 "type": "startup_routes",
                 "data": routes
             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[DEBUG] Error in preload: {e}")
     
     def _cleanup(self) -> None:
         self.stop_event.set()
         if self.api_process:
             self.api_process.terminate()
             try:
-                # Gib dem Prozess kurz Zeit
                 self.api_process.wait(timeout=1)
             except:
                 self.api_process.kill()

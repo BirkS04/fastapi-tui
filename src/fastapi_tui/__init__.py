@@ -68,7 +68,7 @@ from .app import FastAPITUI, TUIManager, get_tui_manager
 from .runner import TUIRunner, run_tui
 
 # Persistence
-from .persistence import TUIPersistence, persistence
+from .persistence import TUIPersistence
 
 # Widgets (for customization)
 from .widgets import (

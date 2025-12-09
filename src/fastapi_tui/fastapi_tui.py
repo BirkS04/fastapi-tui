@@ -19,7 +19,8 @@ from .widgets.request_viewer import RequestViewer
 from .widgets.stats_dashboard import StatsDashboard
 from .widgets.exception_viewer import ExceptionViewer
 from .widgets.server_logs_viewer import ServerLogsViewer
-from .persistence import persistence
+# ÄNDERUNG: Lazy Loading Import nutzen
+from .persistence import get_persistence
 from .core.models import EndpointHit, CustomEvent, EndpointStats, TUIEvent, SystemStats
 
 try:
@@ -190,6 +191,9 @@ class FastAPITUI(App):
 
     def load_history(self):
         """Lädt historische Daten aus der Persistenz"""
+        # ÄNDERUNG: Instanz hier holen
+        persistence = get_persistence()
+        
         # Logs laden
         logs = persistence.get_recent_logs()
         server_logs = self.query_one("#server-logs", ServerLogsViewer)
@@ -220,6 +224,9 @@ class FastAPITUI(App):
     
     def _handle_event(self, event: Dict[str, Any], save: bool = True) -> None:
         """Verarbeitet ein einzelnes Event"""
+        # ÄNDERUNG: Instanz hier holen
+        persistence = get_persistence()
+        
         event_type = event.get("type")
         
         if event_type == "hit":
@@ -284,6 +291,9 @@ class FastAPITUI(App):
         """
         Konvertiert Legacy Request Format zu EndpointHit.
         """
+        # ÄNDERUNG: Instanz hier holen
+        persistence = get_persistence()
+        
         data = req.get("data", req)
         request_id = data.get("id")
         endpoint = data.get("endpoint")
