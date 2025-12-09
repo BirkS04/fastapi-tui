@@ -22,6 +22,7 @@ from .widgets.server_logs_viewer import ServerLogsViewer
 # ÄNDERUNG: Lazy Loading Import nutzen
 from .persistence import get_persistence
 from .core.models import EndpointHit, CustomEvent, EndpointStats, TUIEvent, SystemStats
+from .config import get_config
 
 try:
     import psutil
@@ -143,6 +144,7 @@ class FastAPITUI(App):
         self.endpoint_viewers: Dict[str, RequestViewer] = {}
         self.running = True
         self.start_time = datetime.now()
+        self.config = get_config()
     
     def compose(self) -> ComposeResult:
         """Layout der App"""
@@ -179,15 +181,37 @@ class FastAPITUI(App):
             Static("Select an endpoint to view details", id="placeholder")
         )
 
+        # --- NEU: UI Settings anwenden ---
+        
+        # 1. Sidebar ausblenden?
+        if not self.config.show_sidebar:
+            sidebar = self.query_one("#endpoint-list", EndpointList)
+            sidebar.add_class("hidden")
+            
+        # 2. Stats Panel ausblenden?
+        if not self.config.show_stats_panel:
+            # Wir entfernen den Tab "Statistics" komplett oder verstecken ihn
+            # Da Tabs schwer dynamisch zu verstecken sind, entfernen wir den Inhalt
+            # oder wir lassen es einfach leer.
+            # Einfacher: Wir setzen das Panel auf display: none via CSS im Code
+            stats_panel = self.query_one("#stats-panel", StatsDashboard)
+            stats_panel.styles.display = "none"
+            
+            # Optional: Wenn Stats aus sind, sammeln wir auch keine System-Stats
+            # (Performance sparen)
+            self.config.enable_stats = False 
+
+        # ---------------------------------
+
         # 1. Lade Historie aus DB
         self.load_history()
         
         # 2. Starte Event-Processing
         self.set_interval(0.1, self.process_events)
         
-        # 3. Starte System-Stats Collection
-        self.set_interval(2.0, self._collect_system_stats)
-
+        # 3. Starte System-Stats Collection (nur wenn aktiviert)
+        if self.config.enable_stats:
+            self.set_interval(2.0, self._collect_system_stats)
 
     def load_history(self):
         """Lädt historische Daten aus der Persistenz"""

@@ -4,18 +4,23 @@ from datetime import datetime
 from multiprocessing import Queue as MPQueue
 from fastapi import FastAPI
 
-# Imports aus deinem bestehenden TUI-Package
 from .loggers.server_logger import init_logger
 from .ipc import get_queue_client
 from .middleware import TUIMiddleware
+# NEU: Config importieren
+from .config import get_config
 
 def setup_tui_logging(queue: MPQueue):
     """
-    Richtet Logging ein.
-    Entfernt Standard-Handler um Duplikate und TUI-Glitches zu vermeiden.
+    Richtet Logging ein (Queue + Optional File).
     """
     if not queue:
         return
+
+    config = get_config() # NEU: Config laden
+    
+    # Level aus Config holen (z.B. "DEBUG" -> logging.DEBUG)
+    target_level = getattr(logging, config.log_level.value.upper(), logging.INFO)
 
     # 1. Basis Logger initialisieren
     init_logger(queue)
@@ -34,48 +39,56 @@ def setup_tui_logging(queue: MPQueue):
         except Exception:
             pass
 
-    # 2. Stdout/Stderr umleiten (BridgeLogger)
+    # 2. Stdout/Stderr umleiten
     class BridgeLogger:
         def write(self, msg):
             try:
                 if msg and msg.strip():
                     send_log_to_queue(msg.strip(), "PRINT", "PRINT")
-            except Exception:
-                pass 
+            except Exception: pass 
         def flush(self): pass
         def isatty(self): return False
         
     sys.stdout = BridgeLogger()
     sys.stderr = BridgeLogger()
 
-    # 3. Logging Handler für Uvicorn & FastAPI Logger
+    # 3. TUI Handler (Queue)
     class TUILogHandler(logging.Handler):
         def emit(self, record):
             try:
                 msg = self.format(record)
                 log_type = "UVICORN"
-                if "access" in record.name:
-                    log_type = "ACCESS"
-                elif "error" in record.name:
-                    log_type = "ERROR"
-                
+                if "access" in record.name: log_type = "ACCESS"
+                elif "error" in record.name: log_type = "ERROR"
                 send_log_to_queue(msg, record.levelname, log_type)
-            except Exception:
-                pass
+            except Exception: pass
 
     tui_handler = TUILogHandler()
-    tui_handler.setLevel(logging.INFO)
+    tui_handler.setLevel(target_level) # NEU: Level aus Config
     formatter = logging.Formatter('%(message)s')
     tui_handler.setFormatter(formatter)
+    
+    handlers_list = [tui_handler]
 
-    # 4. Bestehende Handler patchen
+    # 4. NEU: File Handler (wenn aktiviert)
+    if config.log_to_file:
+        try:
+            file_handler = logging.FileHandler(config.log_file_path, mode='a', encoding='utf-8')
+            file_handler.setLevel(target_level)
+            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            handlers_list.append(file_handler)
+        except Exception as e:
+            print(f"[TUI] Error setting up file logging: {e}")
+
+    # 5. Bestehende Handler patchen
     loggers_to_patch = ["uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"]
     
     for logger_name in loggers_to_patch:
         logger = logging.getLogger(logger_name)
-        logger.handlers = [tui_handler]
+        logger.handlers = handlers_list # NEU: Liste mit TUI + File Handler
         logger.propagate = False
-        logger.setLevel(logging.INFO)
+        logger.setLevel(target_level) # NEU: Level aus Config
 
 def create_tui_app(app: FastAPI) -> FastAPI:
     """
@@ -88,16 +101,9 @@ def create_tui_app(app: FastAPI) -> FastAPI:
     """
     # Queue holen (nur vorhanden, wenn via TUI Runner gestartet)
     log_queue = get_queue_client()
-    
     if log_queue:
-        # 1. Logging Setup aufrufen (Stdout redirection etc.)
         setup_tui_logging(log_queue)
-        
-        # 2. Middleware hinzufügen
         app.add_middleware(TUIMiddleware, queue=log_queue)
-        
-    # 3. App zurückgeben
     return app
 
-# Alias für Rückwärtskompatibilität
 configure_tui = create_tui_app

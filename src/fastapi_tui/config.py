@@ -49,13 +49,8 @@ class TUIConfig:
     # Request filtering
     # Standardmäßig filtern wir nur technische Health-Checks.
     # Alles andere wird geloggt.
-    exclude_paths: Set[str] = field(default_factory=lambda: {
-        "/health",
-        "/healthz", 
-        "/ready",
-        "/metrics",
-        "/favicon.ico"
-    })
+    exclude_paths: Set[str] = field(default_factory=lambda: {})
+    
     exclude_methods: Set[str] = field(default_factory=set)
     
     # Sensitive data masking
