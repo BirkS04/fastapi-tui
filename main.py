@@ -13,7 +13,7 @@ from app.routers.flow_edit_tools import router as flow_edit_tools_router
 from app.routers.crawl import router as crawl_router
 
 # TUI Imports
-from fastapi_tui import with_tui, TUIConfig, configure_tui
+from fastapi_tui import with_tui, TUIConfig, create_tui_app
 from fastapi_tui.exception_handler_utils import handle_exception_with_tui
 
 load_dotenv()
@@ -23,9 +23,7 @@ version = os.getenv("API_VERSION", "v1")
 # --- 1. APP ERSTELLEN (Ganz normal) ---
 app = FastAPI()
 
-# --- 2. TUI KONFIGURIEREN ---
-# Das muss hier stehen, damit die Middleware geladen wird
-configure_tui(app)
+
 
 # --- 3. MIDDLEWARE ---
 app.add_middleware(
@@ -52,19 +50,32 @@ app.include_router(flow_edit_tools_router, prefix=f"/api/{version}", tags=["flow
 app.include_router(crawl_router, prefix=f"/api/{version}", tags=["crawl"])
 app.include_router(agents5_router, prefix=f"/api/{version}/agents", tags=["agents"])
 
+# --- 2. TUI KONFIGURIEREN ---
+# Das muss hier stehen, damit die Middleware geladen wird
+app = create_tui_app(app)
 
 # --- 6. ENTRY POINT ---
 if __name__ == "__main__":
     # Config erstellen
     config = TUIConfig(
-        enable_persistence=False, 
-        reload=True,
+        enable_persistence=False,
+        
+        # NEU: Endpoints filtern
+        exclude_paths={
+            "/health",
+            "/metrics", 
+            "/docs", 
+            "/redoc", 
+            "/openapi.json"
+        },
+        exclude_methods={
+        }
     )
     
     # Starten
     with_tui(
-        app=app,                         # Einfach die App übergeben
-        app_module="app.main:app",       # String für Uvicorn Reload
+        app=app,
+        app_module="app.main:app",
         config=config,
         host="127.0.0.1",
         port=8000

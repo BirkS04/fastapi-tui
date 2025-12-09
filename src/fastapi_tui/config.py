@@ -37,7 +37,7 @@ class TUIConfig:
     max_log_lines: int = 1000
     
     exclude_paths: Set[str] = field(default_factory=lambda: {
-        "/health", "/healthz", "/ready", "/metrics", "/favicon.ico"
+        
     })
     exclude_methods: Set[str] = field(default_factory=set)
     

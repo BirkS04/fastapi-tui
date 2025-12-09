@@ -175,17 +175,41 @@ class TUIRunner:
         try:
             routes = []
             for route in target_app.routes:
-                if hasattr(route, "path"):
-                    routes.append({
-                        "path": route.path,
-                        "methods": list(getattr(route, "methods", []))
-                    })
+                if not hasattr(route, "path"):
+                    continue
+                
+                path = route.path
+                
+                # 1. Filter: Exclude Paths
+                # Prüft, ob der Pfad exakt in der Ausschlussliste ist
+                if path in self.config.exclude_paths:
+                    continue
+                
+                # 2. Filter: Exclude Methods
+                raw_methods = list(getattr(route, "methods", []))
+                
+                # Filtere Methoden heraus, die in exclude_methods stehen
+                allowed_methods = [
+                    m for m in raw_methods 
+                    if m.upper() not in self.config.exclude_methods
+                ]
+                
+                # Wenn keine erlaubten Methoden übrig bleiben, Route gar nicht anzeigen
+                if not allowed_methods:
+                    continue
+
+                routes.append({
+                    "path": path,
+                    "methods": allowed_methods
+                })
+            
             self.queue.put({
                 "type": "startup_routes",
                 "data": routes
             })
-        except Exception: pass
-    
+        except Exception as e:
+            print(f"[DEBUG] Error extracting routes: {e}")
+
     def _cleanup(self) -> None:
         self.stop_event.set()
         if self.api_process:
