@@ -11,6 +11,14 @@ import json
 from datetime import datetime
 from .auto_scroll_log import AutoScrollLog
 
+# --- NEU: Clipboard Utils Import ---
+try:
+    from ..clipboard_utils import copy_and_notify
+except ImportError:
+    def copy_and_notify(widget, text, message):
+        widget.notify("Clipboard utils not found", severity="error")
+# -----------------------------------
+
 class ExceptionDetail(Container):
     """Detailed view of a single exception with traceback and frame info."""
     
@@ -23,28 +31,30 @@ class ExceptionDetail(Container):
         border: none;
     }
     ExceptionDetail .action-bar {
-        height: 2;
+        height: 3;
         width: 100%;
         margin: 0;
         padding: 0;
+        align-vertical: middle;
+        background: $surface-lighten-1;
     }
     ExceptionDetail .exception-header {
-        width: auto;
+        width: 1fr;
         padding: 0 1;
         height: auto;
+        content-align: left middle;
     }
     ExceptionDetail .exception-meta {
         margin: 0;
         padding: 0 1;
         height: auto;
     }
-    ExceptionDetail #btn-copy-details {
+    /* Angepasst für zwei Buttons */
+    ExceptionDetail .copy-btn {
         width: auto;
-        min-width: 4;
-        min-height: 3;
-        dock: right;
-        content-align: center middle;
-        text-align: center;
+        min-width: 10;
+        height: auto;
+        margin-left: 1;
     }
     ExceptionDetail TabbedContent {
         height: 1fr;
@@ -57,13 +67,16 @@ class ExceptionDetail(Container):
         self.exc_data = exc_data
     
     def compose(self):
-        # Header with exception type and message + copy button
+        # Header with exception type and message + copy buttons
         exc_type = self.exc_data.get("exception_type", "Unknown")
         message = self.exc_data.get("message", "No message")
         
         with Horizontal(classes="action-bar"):
             yield Static(f"[bold red]⚠ {exc_type}[/]: {message[:200]}", classes="exception-header")
-            yield Button("📋copy", id="btn-copy-details", variant="primary")
+            # --- NEU: Die zwei Buttons ---
+            yield Button("📋 Summary", id="btn-copy-summary", variant="default", classes="copy-btn")
+            yield Button("📑 Full", id="btn-copy-full", variant="primary", classes="copy-btn")
+            # -----------------------------
         
         # Request info
         endpoint = self.exc_data.get("endpoint", "Unknown")
@@ -87,7 +100,6 @@ class ExceptionDetail(Container):
                     variables = error_frame.get("variables", [])
                     if variables:
                         # Reuse VariableInspector logic but focused on variables
-                        # Or just a simple table
                         yield Static("[bold]Variables at Error Time[/]", classes="section-header")
                         
                         # Create a simple table for quick view
@@ -131,27 +143,34 @@ class ExceptionDetail(Container):
                 log.write(traceback_str)
                 yield log
 
-    @on(Button.Pressed, "#btn-copy-details")
-    def on_copy_details(self):
-        """Copy exception details to clipboard."""
-        try:
-            import pyperclip
-            # Format a nice report
-            lines = []
-            lines.append(f"Exception: {self.exc_data.get('exception_type')}")
-            lines.append(f"Message: {self.exc_data.get('message')}")
-            lines.append(f"Endpoint: {self.exc_data.get('method')} {self.exc_data.get('endpoint')}")
-            lines.append(f"Time: {self.exc_data.get('timestamp')}")
-            lines.append("\nTraceback:")
-            lines.append(self.exc_data.get("traceback_str", ""))
-            
-            text = "\n".join(lines)
-            pyperclip.copy(text)
-            self.notify("Exception details copied to clipboard!", title="Copied")
-        except ImportError:
-            self.notify("Please install 'pyperclip' to enable copying.", title="Error", severity="error")
-        except Exception as e:
-            self.notify(f"Failed to copy: {e}", title="Error", severity="error")
+    # --- NEU: Handler für die neuen Buttons ---
+    @on(Button.Pressed, "#btn-copy-summary")
+    def copy_summary(self):
+        """Copies Error Type, Message and Location."""
+        lines = [
+            f"Exception: {self.exc_data.get('exception_type')}",
+            f"Message: {self.exc_data.get('message')}",
+            f"Endpoint: {self.exc_data.get('method')} {self.exc_data.get('endpoint')}",
+            f"Time: {self.exc_data.get('timestamp')}"
+        ]
+        text = "\n".join(lines)
+        copy_and_notify(self, text, "Summary copied!")
+
+    @on(Button.Pressed, "#btn-copy-full")
+    def copy_full(self):
+        """Copies everything including traceback."""
+        lines = [
+            "=== EXCEPTION REPORT ===",
+            f"Type: {self.exc_data.get('exception_type')}",
+            f"Message: {self.exc_data.get('message')}",
+            f"Endpoint: {self.exc_data.get('method')} {self.exc_data.get('endpoint')}",
+            f"Time: {self.exc_data.get('timestamp')}",
+            "\n--- TRACEBACK ---",
+            self.exc_data.get("traceback_str", "")
+        ]
+        text = "\n".join(lines)
+        copy_and_notify(self, text, "Full report copied!")
+    # ------------------------------------------
 
 
 class VariableDetail(Static):
@@ -452,6 +471,7 @@ class ExceptionViewer(Container):
     Shows list of recent exceptions with click-to-expand details.
     """
     
+    # Reactive list of exceptions
     exceptions: reactive[List[Dict[str, Any]]] = reactive([], always_update=True)
     
     def __init__(self, **kwargs):
@@ -479,14 +499,33 @@ class ExceptionViewer(Container):
     
     def add_exception(self, exc_data: Dict[str, Any]):
         """Add a new exception to the list."""
+        # Wir erstellen eine neue Liste, damit Textual die Änderung bemerkt
         new_list = [exc_data] + self.exceptions[:99]  # Keep max 100
         self.exceptions = new_list
     
+    def clear(self) -> None:
+        """
+        Löscht alle Exceptions aus der Ansicht.
+        Wird beim Session-Wechsel aufgerufen.
+        """
+        self.exceptions = []
+        
+        if self._mounted:
+            # Tabelle leeren
+            self.query_one("#exceptions-table", DataTable).clear()
+            
+            # Detail-Ansicht zurücksetzen
+            container = self.query_one("#exception-detail-container", ScrollableContainer)
+            container.remove_children()
+            container.mount(Static("[dim]Select an exception to view details[/]", id="exception-detail-placeholder"))
+
     def watch_exceptions(self, old_list, new_list):
+        """Reagiert auf Änderungen der exceptions-Liste."""
         if self._mounted:
             self._refresh_table()
     
     def _refresh_table(self):
+        """Baut die Tabelle basierend auf self.exceptions neu auf."""
         table = self.query_one("#exceptions-table", DataTable)
         table.clear()
         
@@ -495,8 +534,11 @@ class ExceptionViewer(Container):
             if isinstance(timestamp, str):
                 # Parse ISO format
                 try:
-                    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                    time_str = dt.strftime("%H:%M:%S")
+                    # Einfaches Parsing, ignoriert Zeitzonen für Display
+                    if "T" in timestamp:
+                        time_str = timestamp.split("T")[1].split(".")[0]
+                    else:
+                        time_str = timestamp[:19]
                 except:
                     time_str = timestamp[:8]
             elif isinstance(timestamp, datetime):
@@ -504,10 +546,11 @@ class ExceptionViewer(Container):
             else:
                 time_str = "?"
             
-            exc_type = exc.get("exception_type", "Unknown")[:18]
-            endpoint = exc.get("endpoint", "?")[:28]
-            message = exc.get("message", "")[:48]
+            exc_type = str(exc.get("exception_type", "Unknown"))[:25]
+            endpoint = str(exc.get("endpoint", "?"))[:35]
+            message = str(exc.get("message", ""))[:60]
             
+            # Wir nutzen den Index als Key, da er eindeutig in der Liste ist
             table.add_row(
                 time_str,
                 exc_type,
@@ -519,10 +562,11 @@ class ExceptionViewer(Container):
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
         if event.data_table.id == "exceptions-table":
             try:
-                index = int(event.row_key.value)
-                if 0 <= index < len(self.exceptions):
-                    exc = self.exceptions[index]
-                    self._show_exception_detail(exc)
+                if event.row_key:
+                    index = int(event.row_key.value)
+                    if 0 <= index < len(self.exceptions):
+                        exc = self.exceptions[index]
+                        self._show_exception_detail(exc)
             except (ValueError, TypeError):
                 pass
     
@@ -530,7 +574,6 @@ class ExceptionViewer(Container):
         container = self.query_one("#exception-detail-container", ScrollableContainer)
         container.remove_children()
         container.mount(ExceptionDetail(exc))
-
 
 class RequestExceptionView(Container):
     """

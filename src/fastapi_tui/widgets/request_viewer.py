@@ -10,11 +10,6 @@ from ..core.models import EndpointHit, CustomEvent
 from .request_inspector import RequestInspector
 
 
-def log_debug(msg):
-    with open("debug.log", "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
-
-
 class RequestViewer(Vertical):
     # always_update=True ist wichtig!
     hits: reactive[List[EndpointHit]] = reactive([], always_update=True)
@@ -56,11 +51,12 @@ class RequestViewer(Vertical):
         events_table.add_columns("Time", "Type", "Level", "Message")
         
         self._mounted = True
+        
+        # Falls schon Hits da sind (z.B. durch schnelles Laden), Tabelle füllen
+        if self.hits:
+            self._refresh_table_smart(self.hits)
 
     def add_hit(self, hit: EndpointHit) -> None:
-        # LOGGING: Was kommt rein?
-        # log_debug(f"ADD_HIT aufgerufen für ID={hit.id[:8]} | Pending={hit.pending} | Status={hit.status_code}")
-
         # 1. Echte Kopie erstellen (WICHTIG!)
         hit_safe = hit.model_copy()
         
@@ -76,21 +72,19 @@ class RequestViewer(Vertical):
         
         if existing_index >= 0:
             new_list[existing_index] = hit_safe
-            # log_debug(f" -> Update existierender Hit an Index {existing_index}")
         else:
+            # Neue Hits vorne einfügen (neueste zuerst)
             new_list.insert(0, hit_safe)
             new_list = new_list[:100]
-            # log_debug(f" -> Neuer Hit eingefügt")
 
         # 4. Zuweisen (triggert watch_hits)
         self.hits = new_list
+
     def add_event(self, event: CustomEvent) -> None:
         self.events = [event] + self.events[:99]
 
     def watch_hits(self, old_hits: List[EndpointHit], new_hits: List[EndpointHit]) -> None:
         if not self._mounted: return
-        
-        # log_debug(f"WATCH_HITS getriggert. Anzahl Hits: {len(new_hits)}")
         
         # 1. Tabelle aktualisieren
         self._refresh_table_smart(new_hits)
@@ -99,7 +93,7 @@ class RequestViewer(Vertical):
         self._update_inspector_live()
         
         # 3. Erzwinge Neuzeichnen der Tabelle (Sicherheitshalber)
-        self.query_one("#requests-table", DataTable).refresh()
+        # self.query_one("#requests-table", DataTable).refresh()
 
     def _refresh_table_smart(self, current_hits: List[EndpointHit]):
         """Refresh table with correct order - newest first."""
@@ -110,9 +104,11 @@ class RequestViewer(Vertical):
         current_keys = {str(hit.id) for hit in current_hits}
         new_keys = current_keys - existing_keys
         
-        # If there are new rows, we need to rebuild to maintain order
-        # (DataTable.add_row always adds at bottom)
-        if new_keys:
+        # FIX: Wenn Tabelle leer ist (z.B. nach Mount oder Clear), müssen wir ALLES neu bauen
+        is_empty = len(table.rows) == 0
+        
+        # If there are new rows OR table is empty, we need to rebuild to maintain order
+        if new_keys or is_empty:
             # Remember selected row
             selected_key = None
             if table.cursor_row is not None and table.row_count > 0:
@@ -147,6 +143,12 @@ class RequestViewer(Vertical):
                     hit.id[:8],
                     key=row_key
                 )
+                
+            # Restore selection if possible
+            if selected_key and selected_key in current_keys:
+                 # Optional: Cursor wiederherstellen (API ist etwas tricky in Textual)
+                 pass
+                 
         else:
             # No new rows - just update existing cells
             for hit in current_hits:
@@ -168,19 +170,18 @@ class RequestViewer(Vertical):
                 
                 table.update_cell(row_key, "col_status", status_render)
                 table.update_cell(row_key, "col_duration", duration_str)
+
     def _update_inspector_live(self):
         """Prüft, ob wir gerade einen Request anschauen, der geupdated wurde."""
         if not self._current_viewing_hit_id:
             return
 
         # Den aktuellen Hit aus der Liste holen
-        # (Wir holen ihn frisch aus self.hits, da dort die neuen Daten liegen)
         current_hit = next((h for h in self.hits if h.id == self._current_viewing_hit_id), None)
         
         if current_hit:
             try:
                 inspector = self.query_one(RequestInspector)
-                # Wir rufen explizit die Methode auf
                 inspector.force_refresh_data(current_hit)
             except:
                 pass
@@ -203,7 +204,7 @@ class RequestViewer(Vertical):
         
         self.query_one(TabbedContent).active = "details-tab"
 
-    # Events Tabelle Logik (unverändert, nur der Vollständigkeit halber)
+    # Events Tabelle Logik
     def watch_events(self, old_e, new_e):
         if not self._mounted: return
         table = self.query_one("#events-table", DataTable)
@@ -216,3 +217,17 @@ class RequestViewer(Vertical):
                 e.message, 
                 key=e.id
             )
+            
+    def clear(self) -> None:
+        """Leert den Viewer komplett."""
+        self.hits = []
+        self.events = []
+        self._current_viewing_hit_id = None
+        
+        if self._mounted:
+            self.query_one("#requests-table", DataTable).clear()
+            self.query_one("#events-table", DataTable).clear()
+            
+            container = self.query_one("#details-scroll", ScrollableContainer)
+            container.remove_children()
+            container.mount(Static("Select a request to view details", id="details-placeholder"))
