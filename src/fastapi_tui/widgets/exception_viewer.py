@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 from .auto_scroll_log import AutoScrollLog
 
-# --- NEU: Clipboard Utils Import ---
+# --- Clipboard Utils Import ---
 try:
     from ..clipboard_utils import copy_and_notify
 except ImportError:
@@ -49,7 +49,6 @@ class ExceptionDetail(Container):
         padding: 0 1;
         height: auto;
     }
-    /* Angepasst für zwei Buttons */
     ExceptionDetail .copy-btn {
         width: auto;
         min-width: 10;
@@ -73,10 +72,8 @@ class ExceptionDetail(Container):
         
         with Horizontal(classes="action-bar"):
             yield Static(f"[bold red]⚠ {exc_type}[/]: {message[:200]}", classes="exception-header")
-            # --- NEU: Die zwei Buttons ---
             yield Button("📋 Summary", id="btn-copy-summary", variant="default", classes="copy-btn")
             yield Button("📑 Full", id="btn-copy-full", variant="primary", classes="copy-btn")
-            # -----------------------------
         
         # Request info
         endpoint = self.exc_data.get("endpoint", "Unknown")
@@ -99,10 +96,8 @@ class ExceptionDetail(Container):
                     error_frame = frames[-1]
                     variables = error_frame.get("variables", [])
                     if variables:
-                        # Reuse VariableInspector logic but focused on variables
                         yield Static("[bold]Variables at Error Time[/]", classes="section-header")
                         
-                        # Create a simple table for quick view
                         table = DataTable(cursor_type="row")
                         table.add_column("Name", width=20)
                         table.add_column("Value", width=60)
@@ -138,12 +133,10 @@ class ExceptionDetail(Container):
 
             with TabPane("📜 Traceback", id="tab-traceback"):
                 traceback_str = self.exc_data.get("traceback_str", "No traceback available")
-                # Use AutoScrollLog for better UX
                 log = AutoScrollLog(id="traceback-text", highlight=True)
                 log.write(traceback_str)
                 yield log
 
-    # --- NEU: Handler für die neuen Buttons ---
     @on(Button.Pressed, "#btn-copy-summary")
     def copy_summary(self):
         """Copies Error Type, Message and Location."""
@@ -170,7 +163,6 @@ class ExceptionDetail(Container):
         ]
         text = "\n".join(lines)
         copy_and_notify(self, text, "Full report copied!")
-    # ------------------------------------------
 
 
 class VariableDetail(Static):
@@ -333,7 +325,6 @@ class VariableInspector(Container):
                 for idx, frame in enumerate(self.frames):
                     is_last = idx == len(self.frames) - 1
                     filename = frame.get("filename", "?")
-                    # Shorten filename
                     if len(filename) > 30:
                         filename = "..." + filename[-27:]
                     function = frame.get("function", "?")
@@ -354,21 +345,17 @@ class VariableInspector(Container):
                 yield ScrollableContainer(id="var-detail-container")
     
     def on_mount(self):
-        # Setup variable table
         table = self.query_one("#var-table", DataTable)
         table.add_column("Name", key="name", width=15)
         table.add_column("Type", key="type", width=12)
         table.add_column("Value", key="value", width=40)
         table.add_column("", key="expand", width=2)
         
-        # Show error frame (last one)
         if self.frames:
             self.selected_frame_idx = len(self.frames) - 1
     
     def watch_selected_frame_idx(self, old_idx: int, new_idx: int):
         self._show_frame_variables(new_idx)
-        
-        # Update frame highlighting
         for idx in range(len(self.frames)):
             try:
                 frame_btn = self.query_one(f"#frame-{idx}", FrameButton)
@@ -380,7 +367,6 @@ class VariableInspector(Container):
                 pass
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle click on frame button."""
         button_id = event.button.id or ""
         if button_id.startswith("frame-"):
             try:
@@ -396,12 +382,10 @@ class VariableInspector(Container):
         frame = self.frames[frame_idx]
         variables = frame.get("variables", [])
         
-        # Update table
         table = self.query_one("#var-table", DataTable)
         table.clear()
         
         if not variables:
-            # Fallback to locals_preview if variables list is empty (e.g. prod mode or old format)
             locals_preview = frame.get("locals_preview", {})
             for name, val in locals_preview.items():
                  safe_name = str(name).replace("[", "\\[")
@@ -421,7 +405,6 @@ class VariableInspector(Container):
                 is_expand = var.get("is_expandable", False)
                 is_sensitive = var.get("is_sensitive", False)
                 
-                # Format based on type
                 if is_sensitive:
                     preview_styled = "[red]***MASKED***[/]"
                 else:
@@ -439,20 +422,17 @@ class VariableInspector(Container):
                     key=name
                 )
         
-        # Clear detail container
         detail_container = self.query_one("#var-detail-container", ScrollableContainer)
         detail_container.remove_children()
     
     @on(DataTable.RowSelected, "#var-table")
     def on_variable_selected(self, event: DataTable.RowSelected):
-        """Show expanded variable detail when row is selected."""
         if event.row_key is None:
             return
         
         var_name = str(event.row_key.value)
         frame = self.frames[self.selected_frame_idx]
         
-        # Find the variable
         for var in frame.get("variables", []):
             if var.get("name") == var_name:
                 if var.get("is_expandable") and not var.get("is_sensitive"):
@@ -468,7 +448,7 @@ class VariableInspector(Container):
 class ExceptionViewer(Container):
     """
     Exception list viewer for global exceptions tab.
-    Shows list of recent exceptions with click-to-expand details.
+    Shows list of recent exceptions in one tab, and details in another.
     """
     
     # Reactive list of exceptions
@@ -477,14 +457,18 @@ class ExceptionViewer(Container):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._mounted = False
-        self._selected_index = None
     
     def compose(self):
-        yield DataTable(id="exceptions-table")
-        yield ScrollableContainer(
-            Static("[dim]Select an exception to view details[/]", id="exception-detail-placeholder"),
-            id="exception-detail-container"
-        )
+        # --- NEU: TabbedContent für Trennung von Liste und Details ---
+        with TabbedContent(id="exc-view-tabs"):
+            with TabPane("List", id="tab-exc-list"):
+                yield DataTable(id="exceptions-table")
+            
+            with TabPane("Details", id="tab-exc-details"):
+                yield ScrollableContainer(
+                    Static("[dim]Select an exception from the list to view details[/]", id="exception-detail-placeholder"),
+                    id="exception-detail-container"
+                )
     
     def on_mount(self):
         table = self.query_one("#exceptions-table", DataTable)
@@ -499,42 +483,37 @@ class ExceptionViewer(Container):
     
     def add_exception(self, exc_data: Dict[str, Any]):
         """Add a new exception to the list."""
-        # Wir erstellen eine neue Liste, damit Textual die Änderung bemerkt
         new_list = [exc_data] + self.exceptions[:99]  # Keep max 100
         self.exceptions = new_list
     
     def clear(self) -> None:
         """
         Löscht alle Exceptions aus der Ansicht.
-        Wird beim Session-Wechsel aufgerufen.
         """
         self.exceptions = []
         
         if self._mounted:
-            # Tabelle leeren
             self.query_one("#exceptions-table", DataTable).clear()
             
-            # Detail-Ansicht zurücksetzen
             container = self.query_one("#exception-detail-container", ScrollableContainer)
             container.remove_children()
-            container.mount(Static("[dim]Select an exception to view details[/]", id="exception-detail-placeholder"))
+            container.mount(Static("[dim]Select an exception from the list to view details[/]", id="exception-detail-placeholder"))
+            
+            # Switch back to list tab
+            self.query_one("#exc-view-tabs", TabbedContent).active = "tab-exc-list"
 
     def watch_exceptions(self, old_list, new_list):
-        """Reagiert auf Änderungen der exceptions-Liste."""
         if self._mounted:
             self._refresh_table()
     
     def _refresh_table(self):
-        """Baut die Tabelle basierend auf self.exceptions neu auf."""
         table = self.query_one("#exceptions-table", DataTable)
         table.clear()
         
         for i, exc in enumerate(self.exceptions):
             timestamp = exc.get("timestamp", "")
             if isinstance(timestamp, str):
-                # Parse ISO format
                 try:
-                    # Einfaches Parsing, ignoriert Zeitzonen für Display
                     if "T" in timestamp:
                         time_str = timestamp.split("T")[1].split(".")[0]
                     else:
@@ -550,7 +529,6 @@ class ExceptionViewer(Container):
             endpoint = str(exc.get("endpoint", "?"))[:35]
             message = str(exc.get("message", ""))[:60]
             
-            # Wir nutzen den Index als Key, da er eindeutig in der Liste ist
             table.add_row(
                 time_str,
                 exc_type,
@@ -571,9 +549,13 @@ class ExceptionViewer(Container):
                 pass
     
     def _show_exception_detail(self, exc: Dict[str, Any]):
+        """Zeigt Details an und wechselt zum Details-Tab."""
         container = self.query_one("#exception-detail-container", ScrollableContainer)
         container.remove_children()
         container.mount(ExceptionDetail(exc))
+        
+        # --- NEU: Automatisch zum Details-Tab wechseln ---
+        self.query_one("#exc-view-tabs", TabbedContent).active = "tab-exc-details"
 
 class RequestExceptionView(Container):
     """
@@ -605,7 +587,6 @@ class RequestExceptionView(Container):
         
         for i, exc in enumerate(self.exceptions):
             with Collapsible(title=f"{i+1}. {exc.get('exception_type', 'Error')}: {exc.get('message', '')[:50]}", collapsed=(i > 0)):
-                # Add button to jump to global tab
                 yield Button("🔍 View in Global Exceptions Tab", id=f"jump-to-exc-{i}", classes="jump-btn")
                 yield ExceptionDetail(exc)
 
@@ -617,7 +598,6 @@ class RequestExceptionView(Container):
                 idx = int(event.button.id.split("-")[-1])
                 if 0 <= idx < len(self.exceptions):
                     target_exc = self.exceptions[idx]
-                    # Find main app and switch tab
                     app = self.app
                     try:
                         # Switch to Exceptions tab (ID is "tabs" in fastapi_tui.py)
@@ -628,22 +608,19 @@ class RequestExceptionView(Container):
                         viewer = app.query_one("#exceptions-viewer", ExceptionViewer)
                         table = viewer.query_one("#exceptions-table", DataTable)
                         
-                        # Simple matching by timestamp and message
                         target_ts = target_exc.get("timestamp")
                         target_msg = target_exc.get("message")
                         
                         for i, exc in enumerate(viewer.exceptions):
                             if exc.get("timestamp") == target_ts and exc.get("message") == target_msg:
                                 # Found it! Select the row
-                                row_key = str(i)
                                 if table.is_valid_row_index(i):
                                     table.move_cursor(row=i)
-                                    # Manually trigger selection logic since move_cursor doesn't always fire event
+                                    # Trigger detail view + tab switch
                                     viewer._show_exception_detail(exc)
                                 break
                                 
                     except Exception as e:
-                        # Fallback: just switch tab
                         pass
             except Exception:
                 pass
