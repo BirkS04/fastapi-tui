@@ -14,15 +14,19 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Header, Footer, TabbedContent, TabPane, Static
 from textual.reactive import reactive
 from textual.binding import Binding
+
+# Widgets
 from .widgets.endpoint_list import EndpointList
 from .widgets.request_viewer import RequestViewer
 from .widgets.stats_dashboard import StatsDashboard
 from .widgets.exception_viewer import ExceptionViewer
 from .widgets.server_logs_viewer import ServerLogsViewer
-# ÄNDERUNG: Lazy Loading Import nutzen
+from .widgets.session_manager import SessionManager
+
+# Core
+from .config import get_config
 from .persistence import get_persistence
 from .core.models import EndpointHit, CustomEvent, EndpointStats, TUIEvent, SystemStats
-from .config import get_config
 
 try:
     import psutil
@@ -33,10 +37,6 @@ except ImportError:
 class FastAPITUI(App):
     """
     Haupt-TUI-Anwendung für FastAPI-Monitoring
-    
-    Usage:
-        tui = FastAPITUI()
-        tui.run()
     """
     
     CSS = """
@@ -137,6 +137,9 @@ class FastAPITUI(App):
     # Reactive State
     current_endpoint: reactive[str] = reactive("")
     
+    # State für Session Management
+    viewing_session_id: Optional[str] = None
+    
     def __init__(self, event_queue: Optional[Queue] = None):
         super().__init__()
         self.event_queue = event_queue or Queue()
@@ -159,11 +162,9 @@ class FastAPITUI(App):
                 with Vertical(id="main-content"):
                     with TabbedContent(id="tabs"):
                         with TabPane("Endpoints", id="endpoints-tab"):
-                            # Container für den RequestViewer
                             yield Container(id="endpoint-viewer-container")
                         
                         with TabPane("Server Logs", id="logs-tab"):
-                            # ServerLogsViewer mit Untertabs
                             yield ServerLogsViewer(id="server-logs")
                         
                         with TabPane("Exceptions", id="exceptions-tab"):
@@ -171,6 +172,11 @@ class FastAPITUI(App):
                         
                         with TabPane("Statistics", id="stats-tab"):
                             yield StatsDashboard(id="stats-panel")
+                        
+                        # Session Manager Tab (nur wenn Persistence an)
+                        if self.config.enable_persistence:
+                            with TabPane("Sessions", id="sessions-tab"):
+                                yield SessionManager(id="session-manager")
         
         yield Footer()
     
@@ -181,45 +187,35 @@ class FastAPITUI(App):
             Static("Select an endpoint to view details", id="placeholder")
         )
 
-        # --- NEU: UI Settings anwenden ---
-        
-        # 1. Sidebar ausblenden?
+        # UI Settings anwenden
         if not self.config.show_sidebar:
-            sidebar = self.query_one("#endpoint-list", EndpointList)
-            sidebar.add_class("hidden")
+            self.query_one("#endpoint-list", EndpointList).add_class("hidden")
             
-        # 2. Stats Panel ausblenden?
         if not self.config.show_stats_panel:
-            # Wir entfernen den Tab "Statistics" komplett oder verstecken ihn
-            # Da Tabs schwer dynamisch zu verstecken sind, entfernen wir den Inhalt
-            # oder wir lassen es einfach leer.
-            # Einfacher: Wir setzen das Panel auf display: none via CSS im Code
-            stats_panel = self.query_one("#stats-panel", StatsDashboard)
-            stats_panel.styles.display = "none"
-            
-            # Optional: Wenn Stats aus sind, sammeln wir auch keine System-Stats
-            # (Performance sparen)
+            self.query_one("#stats-panel", StatsDashboard).styles.display = "none"
             self.config.enable_stats = False 
 
-        # ---------------------------------
+        # 1. Initiale Session setzen
+        persistence = get_persistence()
+        self.viewing_session_id = persistence.current_session_id
 
-        # 1. Lade Historie aus DB
-        self.load_history()
+        # 2. Lade Historie (für die aktuelle Session)
+        self.load_history(self.viewing_session_id)
         
-        # 2. Starte Event-Processing
+        # 3. Starte Event-Processing
         self.set_interval(0.1, self.process_events)
         
-        # 3. Starte System-Stats Collection (nur wenn aktiviert)
+        # 4. Starte System-Stats Collection
         if self.config.enable_stats:
             self.set_interval(2.0, self._collect_system_stats)
 
-    def load_history(self):
+    def load_history(self, session_id: Optional[str] = None):
         """Lädt historische Daten aus der Persistenz"""
-        # ÄNDERUNG: Instanz hier holen
         persistence = get_persistence()
+        target_session = session_id or persistence.current_session_id
         
-        # Logs laden
-        logs = persistence.get_recent_logs()
+        # 1. Logs laden
+        logs = persistence.get_recent_logs(session_id=target_session)
         server_logs = self.query_one("#server-logs", ServerLogsViewer)
         for log in logs:
             log_data = {
@@ -230,27 +226,83 @@ class FastAPITUI(App):
             }
             server_logs.add_log(log_data)
             
-        # Hits laden
-        hits = persistence.get_recent_hits()
-        # Wir verarbeiten sie als wären es neue Events, aber ohne erneut zu speichern
+        # 2. Hits (Requests) laden
+        hits = persistence.get_recent_hits(session_id=target_session)
+        
+        # Exception Viewer holen
+        exc_viewer = self.query_one("#exceptions-viewer", ExceptionViewer)
+        
         for hit_data in reversed(hits): # Älteste zuerst
             hit = EndpointHit(**hit_data)
+            
+            # A) Request verarbeiten (baut Endpoint Liste & Request Viewer auf)
             self._handle_hit(hit, save=False)
+            
+            # B) Exceptions extrahieren und in den globalen Viewer laden
+            
+            # FIX: Wir prüfen das rohe Dict auf Legacy-Daten, da das Model kein 'exception' Feld hat
+            if "exception" in hit_data and hit_data["exception"]:
+                exc_viewer.add_exception(hit_data["exception"])
+            
+            # Standard Model-Feld (Liste)
+            if hit.exceptions:
+                for exc in hit.exceptions:
+                    exc_viewer.add_exception(exc)
 
     def process_events(self) -> None:
         """Verarbeitet Events aus der Queue"""
+        persistence = get_persistence()
+        
+        # Prüfen ob wir LIVE sind
+        is_live_view = (self.viewing_session_id == persistence.current_session_id)
+        
         try:
             while not self.event_queue.empty():
                 event = self.event_queue.get_nowait()
-                self._handle_event(event, save=True)
+                
+                if is_live_view:
+                    # Normaler Modus: Speichern und Anzeigen
+                    self._handle_event(event, save=True)
+                else:
+                    # History Modus: NUR Speichern (im Hintergrund), NICHT Anzeigen
+                    self._save_event_only(event)
+                    
         except Exception as e:
             self.log(f"Error processing events: {e}")
     
+    def _save_event_only(self, event: Dict[str, Any]) -> None:
+        """Speichert Events in die DB ohne UI-Update (für Background-Processing)"""
+        persistence = get_persistence()
+        event_type = event.get("type")
+        
+        if event_type == "hit":
+            persistence.save_hit(event.get("data", {}))
+        elif event_type == "log":
+            d = event.get("data", {})
+            persistence.save_log(d.get("level", "INFO"), d.get("message", ""), d.get("timestamp", datetime.now()))
+        elif event_type == "request":
+            data = event.get("data", {})
+            # Legacy Request zu Hit Konvertierung für DB (vereinfacht)
+            hit = EndpointHit(
+                id=data.get("id") or str(uuid.uuid4()),
+                endpoint=data.get("endpoint"),
+                method=data.get("method"),
+                status_code=data.get("status_code"),
+                duration_ms=data.get("duration_ms"),
+                timestamp=data.get("timestamp") if isinstance(data.get("timestamp"), datetime) else datetime.now(),
+                client=data.get("client", "unknown"),
+                request_params=data.get("request_params"),
+                request_body=data.get("request_body"),
+                request_headers=data.get("request_headers"),
+                response_body=data.get("response_body"),
+                runtime_logs=data.get("runtime_logs", []),
+                pending=data.get("pending", False)
+            )
+            persistence.save_hit(hit.model_dump())
+
     def _handle_event(self, event: Dict[str, Any], save: bool = True) -> None:
         """Verarbeitet ein einzelnes Event"""
-        # ÄNDERUNG: Instanz hier holen
         persistence = get_persistence()
-        
         event_type = event.get("type")
         
         if event_type == "hit":
@@ -279,54 +331,39 @@ class FastAPITUI(App):
                     log_data.get("message", ""), 
                     log_data.get("timestamp", datetime.now())
                 )
-            # Ensure 'type' field exists for proper routing
             if "type" not in log_data:
                 log_data["type"] = log_data.get("level", "INFO")
             self._handle_log(log_data)
         
         elif event_type == "startup_routes":
-            # Initialisiere Endpoints
             routes = event.get("data", [])
             endpoint_list = self.query_one("#endpoint-list", EndpointList)
             for route in routes:
                 path = route.get("path")
                 methods = route.get("methods", [])
-                # Filtere HEAD/OPTIONS wenn gewünscht, oder nimm die erste Methode
                 method = next((m for m in methods if m not in ["HEAD", "OPTIONS"]), "GET")
                 if path:
                     endpoint_list.add_endpoint(path, method)
-                    # Auch gleich Viewer erstellen
                     self.add_window(path)
             
         elif event_type == "request":
-            # Support für das Format aus app/main.py (request_queue)
-            # Wir konvertieren es in ein EndpointHit
             self._handle_legacy_request(event, save=save)
         
         elif event_type == "runtime_log_update":
-            # Real-time runtime log updates
             self._handle_runtime_log_update(event.get("data", {}))
         
         elif event_type == "exception":
-            # Global exception event
             self._handle_exception_event(event.get("data", {}))
 
     def _handle_legacy_request(self, req: Dict[str, Any], save: bool = True):
-        """
-        Konvertiert Legacy Request Format zu EndpointHit.
-        """
-        # ÄNDERUNG: Instanz hier holen
         persistence = get_persistence()
-        
         data = req.get("data", req)
         request_id = data.get("id")
         endpoint = data.get("endpoint")
         
-        # Check if this is an update to an existing request
         existing_hit = None
         if endpoint in self.endpoint_viewers:
             viewer = self.endpoint_viewers[endpoint]
-            # Wir suchen im Viewer nach dem Hit (Annahme: viewer.hits ist zugänglich)
             if hasattr(viewer, 'hits'): 
                 for hit in viewer.hits:
                     if hit.id == request_id:
@@ -334,7 +371,6 @@ class FastAPITUI(App):
                         break
         
         if data.get("pending") or (not data.get("completed")):
-            # PENDING Request - Create new entry if not exists
             if not existing_hit:
                 hit = EndpointHit(
                     id=request_id or str(uuid.uuid4()),
@@ -350,54 +386,40 @@ class FastAPITUI(App):
                     runtime_logs=data.get("runtime_logs", []),
                     pending=True
                 )
-                
                 if save: persistence.save_hit(hit.model_dump())
                 self._handle_hit(hit, save=save)
             
         elif data.get("completed"):
-            # COMPLETED Request - Update existing or create new
             if existing_hit:
-                # 1. Objekt Update (In-Memory)
                 existing_hit.status_code = data.get("status_code") or data.get("status")
                 existing_hit.duration_ms = data.get("duration_ms") or data.get("duration")
                 existing_hit.response_body = data.get("response_body")
                 existing_hit.runtime_logs = data.get("runtime_logs", [])
                 existing_hit.pending = False
                 
-                # Handle exception if present in update
                 if data.get("exception"):
                     exc_data = data.get("exception")
-                    # Append to exceptions list - create NEW list to trigger reactivity
+                    # FIX: Nur zur Liste hinzufügen, nicht als Attribut setzen
                     existing_hit.exceptions = existing_hit.exceptions + [exc_data]
-                    # Also set legacy field for backward compatibility
-                    existing_hit.exception = exc_data
                 
-                # UI-Update VOR dem Speichern machen!
                 if endpoint in self.endpoint_viewers:
-                    # Das hier updated jetzt sofort das TUI
                     self.endpoint_viewers[endpoint].add_hit(existing_hit)
                 
-                # Speichern in DB (in try/except, damit UI nicht stirbt)
                 if save: 
                     try:
                         persistence.save_hit(existing_hit.model_dump())
                     except Exception as e:
-                        # Fehler ins TUI Log schreiben, damit wir es sehen
                         self.log(f"❌ DB Error saving hit: {e}")
 
-                # Update Stats for completed request
                 if endpoint in self.endpoint_stats:
                     self.endpoint_stats[endpoint].update(existing_hit, count_hit=False)
                     self._update_stats(endpoint, self.endpoint_stats[endpoint])
                 else:
-                    # Should not happen if pending request created stats, but just in case
                     self.endpoint_stats[endpoint] = EndpointStats(endpoint=endpoint)
-                    self.endpoint_stats[endpoint].update(existing_hit, count_hit=True) # Count it if it was missing
+                    self.endpoint_stats[endpoint].update(existing_hit, count_hit=True)
                     self._update_stats(endpoint, self.endpoint_stats[endpoint])
 
-                self.log(f"✅ Updated request {request_id[:8]} to status {existing_hit.status_code}")
             else:
-                # Create new completed hit (fallback)
                 hit = EndpointHit(
                     id=request_id or str(uuid.uuid4()),
                     endpoint=endpoint,
@@ -413,181 +435,94 @@ class FastAPITUI(App):
                     runtime_logs=data.get("runtime_logs", []),
                     pending=False
                 )
-                
                 if save: persistence.save_hit(hit.model_dump())
                 self._handle_hit(hit, save=save)
 
     def _handle_runtime_log_update(self, data: Dict[str, Any]) -> None:
-        """
-        Handles real-time runtime log updates.
-        Updates the hit's runtime_logs and refreshes the inspector if visible.
-        """
         request_id = data.get("request_id")
         all_logs = data.get("all_logs", [])
-        
-        if not request_id:
-            return
-        
-        # Find the hit and update its logs
+        if not request_id: return
         for endpoint, viewer in self.endpoint_viewers.items():
             if hasattr(viewer, 'hits'):
                 for hit in viewer.hits:
                     if hit.id == request_id:
-                        # Update the logs on the hit object
                         hit.runtime_logs = all_logs
-                        # Trigger UI update via add_hit (which calls watch_hits)
                         viewer.add_hit(hit)
                         return
 
     def _handle_exception_event(self, data: Dict[str, Any]) -> None:
-        """
-        Handles global exception events.
-        Adds to global exceptions list and updates request if linked.
-        """
-        # Add to global exceptions viewer
         try:
             exceptions_viewer = self.query_one("#exceptions-viewer", ExceptionViewer)
             exceptions_viewer.add_exception(data)
-        except Exception:
-            pass  # Viewer not mounted yet
+        except Exception: pass
         
-        # Also attach to the corresponding request if we have a request_id
         request_id = data.get("request_id")
         if request_id:
             for endpoint, viewer in self.endpoint_viewers.items():
                 if hasattr(viewer, 'hits'):
                     for hit in viewer.hits:
                         if hit.id == request_id:
-                            # Append to exceptions list - create NEW list to trigger reactivity
+                            # FIX: Nur zur Liste hinzufügen
                             hit.exceptions = hit.exceptions + [data]
-                            # Also set legacy field for backward compatibility
-                            hit.exception = data 
-                            # Force update in viewer
                             viewer.add_hit(hit)
-                            # Also force refresh in inspector if it's open
                             try:
                                 inspector = viewer.query_one("RequestInspector")
                                 if inspector.hit and inspector.hit.id == request_id:
                                     inspector.force_refresh_data(hit)
-                            except:
-                                pass
+                            except: pass
                             return
 
     def _handle_log(self, log_data: Dict[str, Any]) -> None:
-        """Verarbeitet ein Log-Event"""
         server_logs = self.query_one("#server-logs", ServerLogsViewer)
         server_logs.add_log(log_data)
     
     def _handle_hit(self, hit: EndpointHit, save: bool = True) -> None:
-        """
-        Verarbeitet einen Endpoint-Hit.
-        OPTIMIERT: Nutzt reactive state in allen Widgets!
-        """
-        # Füge zur Endpoint-Liste hinzu (triggert watch_endpoints())
         endpoint_list = self.query_one("#endpoint-list", EndpointList)
         endpoint_list.add_endpoint(hit.endpoint, hit.method)
         
-        # Erstelle oder update Viewer
         if hit.endpoint not in self.endpoint_viewers:
             self.add_window(hit.endpoint)
         
-        # ✅ add_hit() triggert automatisch watch_hits() im RequestViewer!
         if hit.endpoint in self.endpoint_viewers:
             viewer = self.endpoint_viewers[hit.endpoint]
             viewer.add_hit(hit)
         
-        # Update Stats
         if hit.endpoint not in self.endpoint_stats:
-            self.endpoint_stats[hit.endpoint] = EndpointStats(endpoint=endpoint)
-            self.log(f"Created new stats for {hit.endpoint}")
+            self.endpoint_stats[hit.endpoint] = EndpointStats(endpoint=hit.endpoint)
         
         self.endpoint_stats[hit.endpoint].update(hit)
-        self.log(f"Stats updated for {hit.endpoint}: {self.endpoint_stats[hit.endpoint].total_hits} total hits")
         self._update_stats(hit.endpoint, self.endpoint_stats[hit.endpoint])
     
     def _handle_custom_event(self, event: CustomEvent) -> None:
-        """
-        Verarbeitet ein Custom-Event.
-        OPTIMIERT: Nutzt reactive state!
-        """
-        # Füge zur Endpoint-Liste hinzu falls noch nicht vorhanden
         endpoint_list = self.query_one("#endpoint-list", EndpointList)
         if event.endpoint not in endpoint_list.endpoints:
             endpoint_list.add_endpoint(event.endpoint, "CUSTOM")
         
-        # Erstelle oder update Viewer
         if event.endpoint not in self.endpoint_viewers:
             self.add_window(event.endpoint)
         
-        # ✅ add_event() triggert automatisch watch_events() im RequestViewer!
         if event.endpoint in self.endpoint_viewers:
             viewer = self.endpoint_viewers[event.endpoint]
             viewer.add_event(event)
     
     def _update_stats(self, endpoint: str, stats: EndpointStats) -> None:
-        """
-        Aktualisiert die Statistiken.
-        OPTIMIERT: Nutzt reactive state im StatsDashboard!
-        """
         stats_dashboard = self.query_one("#stats-panel", StatsDashboard)
-        # ✅ update_stats() triggert automatisch watch_stats() im Dashboard!
         stats_dashboard.update_stats(endpoint, stats)
     
     def add_window(self, endpoint: str) -> None:
-        """
-        Fügt ein neues Window für einen Endpoint hinzu
-        
-        Args:
-            endpoint: Name des Endpoints
-        """
         if endpoint in self.endpoint_viewers:
             return
-        
         viewer = RequestViewer(endpoint)
-        viewer.display = False  # Initially hidden
+        viewer.display = False
         self.endpoint_viewers[endpoint] = viewer
-        
-        # Mount viewer to container immediately
         container = self.query_one("#endpoint-viewer-container", Container)
         container.mount(viewer)
     
-    def log_event(
-        self, 
-        endpoint: str, 
-        message: str, 
-        data: Optional[Dict[str, Any]] = None,
-        level: str = "info"
-    ) -> None:
-        """
-        Loggt ein Custom-Event
-        
-        Args:
-            endpoint: Name des Endpoints
-            message: Event-Message
-            data: Optionale zusätzliche Daten
-            level: Log-Level (info, warning, error)
-        """
-        event = CustomEvent(
-            id=str(uuid.uuid4()),
-            endpoint=endpoint,
-            message=message,
-            data=data,
-            level=level
-        )
-        
-        self.event_queue.put({
-            "type": "custom",
-            "data": event.model_dump()
-        })
-
-
     def _collect_system_stats(self) -> None:
-        """Sammelt System-Metriken"""
         cpu = 0.0
         mem_percent = 0.0
         mem_used = 0.0
         mem_total = 0.0
-        
         if psutil:
             try:
                 cpu = psutil.cpu_percent()
@@ -595,19 +530,15 @@ class FastAPITUI(App):
                 mem_percent = mem.percent
                 mem_used = mem.used / (1024 * 1024)
                 mem_total = mem.total / (1024 * 1024)
-            except Exception:
-                pass
+            except Exception: pass
         
         uptime = (datetime.now() - self.start_time).total_seconds()
-        
-        # Count active connections (approximate by pending requests)
         active_connections = sum(
             1 for viewer in self.endpoint_viewers.values() 
             if hasattr(viewer, 'hits') 
             for hit in viewer.hits 
             if hit.pending
         )
-        
         stats = SystemStats(
             cpu_percent=cpu,
             memory_percent=mem_percent,
@@ -616,32 +547,77 @@ class FastAPITUI(App):
             active_connections=active_connections,
             uptime_seconds=uptime
         )
-        
-        # Update Dashboard
         try:
             dashboard = self.query_one("#stats-panel", StatsDashboard)
             dashboard.update_system_stats(stats)
-        except Exception:
-            pass  # Dashboard might not be mounted yet
+        except Exception: pass
 
     def on_endpoint_list_endpoint_selected(self, message: EndpointList.EndpointSelected) -> None:
-        """Endpoint wurde in der Liste ausgewählt"""
         self.current_endpoint = message.endpoint
-        
-        # 1. Wechsle zum Endpoints Tab
         self.query_one("#tabs", TabbedContent).active = "endpoints-tab"
-        
-        # 2. Verstecke alle Viewer und zeige nur den ausgewählten
-        container = self.query_one("#endpoint-viewer-container", Container)
-        
         for endpoint, viewer in self.endpoint_viewers.items():
             if endpoint == message.endpoint:
                 viewer.display = True
             else:
                 viewer.display = False
     
+    def on_session_manager_session_selected(self, message: SessionManager.SessionSelected) -> None:
+        """Handler wenn Session ausgewählt wurde"""
+        new_session_id = message.session_id
+        
+        if self.viewing_session_id == new_session_id:
+            self.notify("Already viewing this session")
+            return
+            
+        self.viewing_session_id = new_session_id
+        persistence = get_persistence()
+        is_live = (new_session_id == persistence.current_session_id)
+        
+        status_msg = "LIVE Session" if is_live else "HISTORICAL Session"
+        self.notify(f"Switched to {status_msg}")
+        
+        # 1. UI LEEREN
+        self._clear_ui_state()
+        
+        # 2. DATEN LADEN
+        self.load_history(new_session_id)
+    
+    def _clear_ui_state(self) -> None:
+        """Setzt die gesamte UI zurück."""
+        # 1. Endpoint List leeren
+        self.query_one("#endpoint-list", EndpointList).clear()
+        
+        # 2. Logs leeren
+        try:
+            self.query_one("#server-logs", ServerLogsViewer).clear()
+        except: pass
+        
+        # 3. Stats leeren
+        self.query_one("#stats-panel", StatsDashboard).clear()
+
+        # 4. Exceptions leeren
+        try:
+            self.query_one("#exceptions-viewer", ExceptionViewer).clear()
+        except: pass
+        
+        # 5. Request Viewers entfernen (SICHERE METHODE)
+        container = self.query_one("#endpoint-viewer-container", Container)
+        
+        # Wir entfernen alle Kinder, die NICHT der Placeholder sind
+        for child in list(container.children):
+            if child.id != "placeholder":
+                child.remove()
+        
+        # Falls der Placeholder aus irgendeinem Grund weg ist, neu erstellen
+        if not container.query("#placeholder"):
+             container.mount(Static("Select an endpoint to view details", id="placeholder"))
+        
+        self.endpoint_viewers = {}
+        
+        # 6. Interne Stats resetten
+        self.endpoint_stats = {}
+
     def action_toggle_sidebar(self) -> None:
-        """Toggle Endpoint Sidebar"""
         sidebar = self.query_one("#endpoint-list", EndpointList)
         if sidebar.has_class("hidden"):
             sidebar.remove_class("hidden")
@@ -649,11 +625,9 @@ class FastAPITUI(App):
             sidebar.add_class("hidden")
     
     def action_refresh(self) -> None:
-        """Refresh Display"""
         self.refresh()
     
     def action_quit(self) -> None:
-        """Quit App"""
         self.running = False
         self.exit()
 

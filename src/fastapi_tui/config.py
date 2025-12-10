@@ -53,6 +53,14 @@ class TUIConfig:
     
     exclude_methods: Set[str] = field(default_factory=set)
     
+    # Endpoint Display Customization
+    # Prefixe die aus der Anzeige entfernt werden sollen
+    strip_prefixes: List[str] = field(default_factory=list)
+    
+    # String-Replacements für Endpoint-Namen
+    # Format: {"original": "replacement"}
+    endpoint_replacements: Dict[str, str] = field(default_factory=dict)
+    
     # Sensitive data masking
     mask_headers: Set[str] = field(default_factory=lambda: {
         "authorization",
@@ -73,7 +81,7 @@ class TUIConfig:
     # Persistence settings
     db_path: str = "tui_events.db"
 
-    # --- LOGIC METHODS (Das hat gefehlt!) ---
+    # --- LOGIC METHODS ---
 
     def should_log_request(self, path: str, method: str) -> bool:
         """
@@ -93,6 +101,37 @@ class TUIConfig:
             return False
             
         return True
+
+    def format_endpoint_for_display(self, path: str) -> str:
+        """
+        Formatiert einen Endpoint-Path für die Anzeige in der UI.
+        
+        1. Entfernt konfigurierte Prefixe
+        2. Führt String-Replacements durch
+        
+        Beispiel:
+            path = "/api/v1/tools/zusammenfassung"
+            strip_prefixes = ["/api/v1"]
+            endpoint_replacements = {"zusammenfassung": "zsm"}
+            → Result: "/tools/zsm"
+        """
+        formatted = path
+        
+        # 1. Strip Prefixes (längste zuerst, um /api/v1 vor /api zu matchen)
+        for prefix in sorted(self.strip_prefixes, key=len, reverse=True):
+            if formatted.startswith(prefix):
+                formatted = formatted[len(prefix):]
+                break  # Nur ersten Match anwenden
+        
+        # 2. Apply Replacements
+        for original, replacement in self.endpoint_replacements.items():
+            formatted = formatted.replace(original, replacement)
+        
+        # Stelle sicher dass der Path mit / beginnt
+        if not formatted.startswith("/"):
+            formatted = "/" + formatted
+            
+        return formatted
 
     def scrub_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
         """Maskiert Header basierend auf der Config."""
@@ -163,6 +202,17 @@ class TUIConfig:
 
     @classmethod
     def from_env(cls) -> "TUIConfig":
+        # Parse strip_prefixes from env (comma-separated)
+        strip_prefixes_str = os.getenv("TUI_STRIP_PREFIXES", "")
+        strip_prefixes = [p.strip() for p in strip_prefixes_str.split(",") if p.strip()]
+        
+        # Parse endpoint_replacements from env (JSON string)
+        replacements_str = os.getenv("TUI_ENDPOINT_REPLACEMENTS", "{}")
+        try:
+            endpoint_replacements = json.loads(replacements_str)
+        except json.JSONDecodeError:
+            endpoint_replacements = {}
+        
         return cls(
             host=os.getenv("TUI_HOST", "0.0.0.0"),
             port=int(os.getenv("TUI_PORT", "8000")),
@@ -172,6 +222,8 @@ class TUIConfig:
             log_level=LogLevel(os.getenv("TUI_LOG_LEVEL", "info").lower()),
             db_path=os.getenv("TUI_DB_PATH", "tui_events.db"),
             enable_persistence=os.getenv("TUI_ENABLE_PERSISTENCE", "1").lower() in ("1", "true", "yes"),
+            strip_prefixes=strip_prefixes,
+            endpoint_replacements=endpoint_replacements,
         )
     
     @classmethod

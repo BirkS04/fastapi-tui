@@ -174,3 +174,14 @@ class ServerLogsViewer(Container):
         """Load historical logs (e.g., from persistence)"""
         for log_data in logs:
             self.add_log(log_data)
+
+    def clear(self) -> None:
+        """Löscht alle Logs aus der Ansicht."""
+        self.logs = [] # Falls du eine interne Liste hast
+        try:
+            # Annahme: Du nutzt ein RichLog oder TextLog widget
+            self.query_one("RichLog").clear() 
+            # Oder TextLog:
+            # self.query_one("TextLog").clear()
+        except:
+            pass

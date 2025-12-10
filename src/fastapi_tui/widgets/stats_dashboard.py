@@ -4,13 +4,11 @@ Statistics Dashboard - Zeigt Endpoint-Statistiken mit Reactive State
 
 from datetime import timedelta
 from textual.app import ComposeResult
-from textual.widgets import Static, DataTable, Label, Digits
-from textual.containers import Container, Vertical, Horizontal, Grid
+from textual.widgets import Static, DataTable, Label
+from textual.containers import Vertical, Horizontal, Grid
 from textual.reactive import reactive
 from typing import Dict, Optional
 from rich.text import Text
-from rich.panel import Panel
-from rich.align import Align
 
 from ..core.models import EndpointStats, SystemStats
 
@@ -26,6 +24,7 @@ class StatsDashboard(Vertical):
         super().__init__(**kwargs)
         self.border_title = "📊 Statistics Dashboard"
         self._mounted = False
+    
     
     def compose(self) -> ComposeResult:
         # 1. System & Global Stats Area
@@ -103,6 +102,26 @@ class StatsDashboard(Vertical):
         """Aktualisiert die System-Statistiken."""
         self.system_stats = stats
     
+    def clear(self) -> None:
+        """Setzt alle Statistiken zurück."""
+        self.stats = {}
+        self.system_stats = None
+        
+        if self._mounted:
+            # Tabelle leeren
+            self.query_one("#stats-table", DataTable).clear()
+            
+            # Metriken visuell resetten
+            self.query_one("#cpu-stat", Static).update("[dim]CPU[/]\n-")
+            self.query_one("#ram-stat", Static).update("[dim]RAM[/]\n-")
+            self.query_one("#uptime-stat", Static).update("[dim]Uptime[/]\n-")
+            self.query_one("#conns-stat", Static).update("[dim]Conns[/]\n-")
+            
+            self.query_one("#total-req-stat", Static).update("[dim]Total[/]\n0")
+            self.query_one("#error-rate-stat", Static).update("[dim]Errors[/]\n0%")
+            self.query_one("#avg-latency-stat", Static).update("[dim]Latency[/]\n-")
+            self.query_one("#req-rate-stat", Static).update("[dim]Rate[/]\n-")
+
     # ============================================================================
     # INTERNAL UI UPDATES
     # ============================================================================
@@ -195,8 +214,6 @@ class StatsDashboard(Vertical):
         """Aktualisiert die Stats-Tabelle"""
         table = self.query_one("#stats-table", DataTable)
         
-        # Save current selection or scroll position if possible (Textual DataTable is tricky with full refresh)
-        # For now, just clear and re-add.
         table.clear()
         
         # Sortiere nach Total Hits
