@@ -87,12 +87,6 @@ from .widgets import (
     ExceptionViewer,
 )
 
-# Handlers (utilities)
-from .handlers import (
-    format_duration,
-    format_log_line,
-    get_stats_color,
-)
 
 # Loggers
 # Loggers
