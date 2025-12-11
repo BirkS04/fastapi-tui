@@ -1,8 +1,8 @@
 """
 Exception Logger - Captures exceptions with full context for TUI display.
+Optimized for Zero-Overhead in Production.
 """
 
-import os
 import sys
 import traceback
 from datetime import datetime
@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 from queue import Queue
 
 from .runtime_logger import log_queue_ctx, request_id_ctx
-# NEU: Config importieren
 from ..config import get_config
 
 
@@ -48,7 +47,7 @@ def _safe_repr(value: Any, max_length: int = 100) -> str:
 
 def _extract_locals(frame_locals: Dict[str, Any], max_vars: int = 10) -> Dict[str, str]:
     """Extract and sanitize local variables from a frame."""
-    config = get_config() # NEU: Config holen
+    config = get_config()
     result = {}
     count = 0
     
@@ -59,8 +58,6 @@ def _extract_locals(frame_locals: Dict[str, Any], max_vars: int = 10) -> Dict[st
         if name.startswith('_'):
             continue
         
-        # NEU: Maskierung via Config prüfen
-        # Wir nutzen hier mask_body_fields als Liste für sensible Variablennamen
         if name.lower() in config.mask_body_fields:
             result[name] = "***MASKED***"
         else:
@@ -77,17 +74,55 @@ def capture_exception(
     log_queue: Optional[Queue] = None
 ) -> ExceptionInfo:
     """
-    Captures an exception with full context.
-    """
-    config = get_config() # NEU
-    exc_type, exc_value, exc_traceback = sys.exc_info()
+    Captures an exception.
     
-    # NEU: Frames nur sammeln, wenn Exceptions aktiviert sind
+    PERFORMANCE NOTE:
+    In Production (when log_queue is None), this function skips 
+    expensive stack trace analysis and variable extraction.
+    """
+    config = get_config()
+    
+    # 1. Queue ermitteln (Check für Production Mode)
+    queue = log_queue
+    if queue is None:
+        try:
+            queue = log_queue_ctx.get()
+        except LookupError:
+            queue = None
+
+    # 2. Request ID holen (falls vorhanden)
+    try:
+        request_id = request_id_ctx.get()
+    except LookupError:
+        request_id = None
+
+
+    should_capture_details = (queue is not None) and config.enable_exceptions
+
+    # --- FAST PATH (Production) ---
+    if not should_capture_details:
+
+        return ExceptionInfo(
+            exception_type=type(exc).__name__,
+            message=str(exc),
+            traceback_str="Traceback not captured (TUI disabled)", 
+            frames=[], # Leere Liste = Keine Performance Kosten
+            request_id=request_id,
+            endpoint=endpoint,
+            method=method
+        )
+
+    # --- SLOW PATH (Development / TUI Active) ---
+
+    
+    exc_type, exc_value, exc_traceback = sys.exc_info()
     frames = []
-    if config.enable_exceptions and exc_traceback:
+    
+    if exc_traceback:
         tb = exc_traceback
         while tb is not None:
             frame = tb.tb_frame
+
             locals_preview = _extract_locals(dict(frame.f_locals))
             frames.append(StackFrame(
                 filename=frame.f_code.co_filename,
@@ -97,38 +132,24 @@ def capture_exception(
             ))
             tb = tb.tb_next
     
-    try:
-        request_id = request_id_ctx.get()
-    except LookupError:
-        request_id = None
-    
     exc_info = ExceptionInfo(
         exception_type=exc_type.__name__ if exc_type else type(exc).__name__,
         message=str(exc),
-        traceback_str=traceback.format_exc(),
+        traceback_str=traceback.format_exc(), # Teuer: String formatierung
         frames=frames,
         request_id=request_id,
         endpoint=endpoint,
         method=method
     )
     
-    # NEU: Senden nur wenn aktiviert
-    if config.enable_exceptions:
-        try:
-            queue = log_queue
-            if queue is None:
-                try:
-                    queue = log_queue_ctx.get()
-                except LookupError:
-                    queue = None
-            
-            if queue:
-                queue.put_nowait({
-                    "type": "exception",
-                    "data": exc_info.model_dump()
-                })
-        except Exception:
-            pass
+    # An TUI senden
+    try:
+        queue.put_nowait({
+            "type": "exception",
+            "data": exc_info.model_dump()
+        })
+    except Exception:
+        pass
     
     return exc_info
 
